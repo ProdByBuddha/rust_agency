@@ -1,0 +1,21 @@
+{
+  "episodic_memory": {
+    "turns": [
+      {
+        "role": "user",
+        "content": "hello",
+        "timestamp": "2025-12-22T09:43:58.932511Z",
+        "agent": null
+      },
+      {
+        "role": "assistant",
+        "content": "Hello! How can I assist you today?",
+        "timestamp": "2025-12-22T11:40:00.193141Z",
+        "agent": null
+      }
+    ],
+    "max_turns": 20,
+    "max_tokens_estimate": 4000
+  },
+  "last_plan": null
+}

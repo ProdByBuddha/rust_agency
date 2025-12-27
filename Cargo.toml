@@ -1,0 +1,49 @@
+[package]
+name = "rust_agency"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+# Core async runtime and error handling
+uuid = { version = "1.8", features = ["v4", "serde"] }
+sha2 = "0.10"
+anyhow = "1.0"
+tokio = { version = "1.48", features = ["full"] }
+async-trait = "0.1"
+futures-util = "0.3"
+
+# LLM integration
+ollama-rs = { version = "0.3", features = ["default"] }
+
+# Memory system - Vector DB + Embeddings
+chromadb = "0.3"
+fastembed = "4"
+
+# Serialization and schema
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "0.8"
+
+# HTTP client for web search tool
+reqwest = { version = "0.12", features = ["json"] }
+
+# Utilities
+regex = "1.12"
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.37"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2.1"
+html-escape = "0.2"
+libc = "0.2"
+
+# Rate limiting for safety
+governor = "0.8"
+e2b-sdk = "0.1.1"
+dotenv = "0.15.0"
+daytona-client = "0.5.0"
+bollard = "0.19.4"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio-test = "0.4"

@@ -1,0 +1,321 @@
+//! Tool System Module
+//! 
+//! Provides structured tool calling with JSON schema definitions
+//! and result caching for high performance.
+
+mod web_search;
+mod code_exec;
+mod memory_query;
+mod artifact;
+mod sandbox;
+mod codebase;
+mod system;
+mod dynamic;
+mod knowledge_graph;
+mod agency_control;
+mod bitnet;
+
+pub use web_search::WebSearchTool;
+pub use code_exec::CodeExecTool;
+pub use memory_query::MemoryQueryTool;
+pub use artifact::ArtifactTool;
+pub use sandbox::SandboxTool;
+pub use codebase::CodebaseTool;
+pub use system::SystemTool;
+pub use knowledge_graph::KnowledgeGraphTool;
+pub use agency_control::AgencyControlTool;
+pub use bitnet::BitNetInferenceTool;
+pub use dynamic::{DynamicTool, ForgeTool};
+
+use anyhow::Result;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::path::Path;
+use tokio::sync::{Mutex, RwLock};
+
+/// Output from a tool execution
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolOutput {
+    /// Whether the tool execution was successful
+    pub success: bool,
+    /// The output data (can be string, JSON object, etc.)
+    pub data: Value,
+    /// Human-readable summary of the output
+    pub summary: String,
+    /// Optional error message if success is false
+    pub error: Option<String>,
+}
+
+impl ToolOutput {
+    /// Create a successful output
+    pub fn success(data: impl Into<Value>, summary: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            data: data.into(),
+            summary: summary.into(),
+            error: None,
+        }
+    }
+
+    /// Create a successful output with string data
+    pub fn success_str(content: impl Into<String>) -> Self {
+        let content = content.into();
+        Self {
+            success: true,
+            summary: content.clone(),
+            data: Value::String(content),
+            error: None,
+        }
+    }
+
+    /// Create a failed output
+    pub fn failure(error: impl Into<String>) -> Self {
+        let error = error.into();
+        Self {
+            success: false,
+            data: Value::Null,
+            summary: format!("Error: {}", error),
+            error: Some(error),
+        }
+    }
+}
+
+/// A tool call request parsed from LLM output
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub struct ToolCall {
+    /// Name of the tool to call
+    pub name: String,
+    /// Parameters for the tool
+    pub parameters: Value,
+}
+
+/// Trait for tools that can be called by agents
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// Get the name of this tool
+    fn name(&self) -> &str;
+    
+    /// Get a description of what this tool does
+    fn description(&self) -> &str;
+    
+    /// Get the JSON schema for this tool's parameters
+    fn parameters_schema(&self) -> Value;
+    
+    /// Execute the tool with the given parameters
+    async fn execute(&self, params: Value) -> Result<ToolOutput>;
+    
+    /// Whether this tool requires confirmation before execution
+    fn requires_confirmation(&self) -> bool {
+        false
+    }
+}
+
+/// Registry for available tools with built-in caching
+pub struct ToolRegistry {
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    cache: Arc<Mutex<HashMap<String, ToolOutput>>>,
+}
+
+impl ToolRegistry {
+    /// Create a new empty registry
+    pub fn new() -> Self {
+        Self {
+            tools: RwLock::new(HashMap::new()),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register a tool
+    pub async fn register<T: Tool + 'static + Default>(&self) {
+        let tool = T::default();
+        let mut tools = self.tools.write().await;
+        tools.insert(tool.name().to_string(), Arc::new(tool));
+    }
+
+    /// Register a tool instance
+    pub async fn register_instance<T: Tool + 'static>(&self, tool: T) {
+        let mut tools = self.tools.write().await;
+        tools.insert(tool.name().to_string(), Arc::new(tool));
+    }
+
+    /// Load all dynamic tools from a directory
+    pub async fn load_dynamic_tools(&self, dir_path: impl AsRef<Path>) -> Result<usize> {
+        let path = dir_path.as_ref();
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                match DynamicTool::from_file(&path) {
+                    Ok(tool) => {
+                        tracing::info!("Loaded dynamic tool: {}", tool.name());
+                        let mut tools = self.tools.write().await;
+                        tools.insert(tool.name().to_string(), Arc::new(tool));
+                        count += 1;
+                    }
+                    Err(e) => tracing::warn!("Failed to load dynamic tool at {:?}: {}", path, e),
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Get all tool names
+    pub async fn tool_names(&self) -> Vec<String> {
+        let tools = self.tools.read().await;
+        tools.keys().cloned().collect()
+    }
+
+    /// Generate a combined schema for all tools (for LLM prompt)
+    pub async fn generate_tools_prompt(&self) -> String {
+        let names = self.tool_names().await;
+        self.generate_filtered_tools_prompt(&names).await
+    }
+
+    /// Generate a schema for specific tools
+    pub async fn generate_filtered_tools_prompt(&self, allowed_names: &[String]) -> String {
+        if allowed_names.is_empty() {
+            return "No tools available for this task.\n".to_string();
+        }
+
+        let mut prompt = String::from("Available Tools:\n\n");
+        
+        let tools = self.tools.read().await;
+        let mut names: Vec<_> = allowed_names.iter().filter(|n| tools.contains_key(*n)).collect();
+        names.sort();
+
+        for name in names {
+            let tool = &tools[name];
+            prompt.push_str(&format!("## {}\n", name));
+            prompt.push_str(&format!("Description: {}\n", tool.description()));
+            prompt.push_str(&format!("Parameters: {}\n\n", 
+                serde_json::to_string_pretty(&tool.parameters_schema()).unwrap_or_default()
+            ));
+        }
+        
+        prompt
+    }
+
+    /// Get a specific tool by name
+    pub async fn get_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        let tools = self.tools.read().await;
+        tools.get(name).cloned()
+    }
+
+    /// Execute a tool call with caching
+    pub async fn execute(&self, call: &ToolCall) -> Result<ToolOutput> {
+        let cache_key = format!("{}:{}", call.name, serde_json::to_string(&call.parameters)?);
+        
+        // Check cache
+        {
+            let cache = self.cache.lock().await;
+            if let Some(output) = cache.get(&cache_key) {
+                tracing::debug!("Cache Hit for tool: {}", call.name);
+                return Ok(output.clone());
+            }
+        }
+
+        let tool = {
+            let tools = self.tools.read().await;
+            tools.get(&call.name).cloned()
+        };
+
+        let result = match tool {
+            Some(tool) => tool.execute(call.parameters.clone()).await?,
+            None => ToolOutput::failure(format!("Unknown tool: {}", call.name)),
+        };
+
+        // Update cache if successful or specific failure
+        if result.success {
+            let mut cache = self.cache.lock().await;
+            cache.insert(cache_key, result.clone());
+        }
+
+        Ok(result)
+    }
+
+    /// Execute multiple tool calls in parallel
+    pub async fn execute_parallel(&self, calls: &[ToolCall]) -> Vec<Result<ToolOutput>> {
+        let mut futures = Vec::new();
+        for call in calls {
+            futures.push(self.execute(call));
+        }
+        futures_util::future::join_all(futures).await
+    }
+
+    /// Clear the tool cache
+    pub async fn clear_cache(&self) {
+        let mut cache = self.cache.lock().await;
+        cache.clear();
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct MockTool;
+
+    #[async_trait]
+    impl Tool for MockTool {
+        fn name(&self) -> &str { "mock_tool" }
+        fn description(&self) -> &str { "A mock tool for testing" }
+        fn parameters_schema(&self) -> Value { json!({"type": "object"}) }
+        async fn execute(&self, params: Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::success(params, "Mock execution successful"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_registration() {
+        let registry = ToolRegistry::new();
+        registry.register::<MockTool>().await;
+        
+        let names = registry.tool_names().await;
+        assert!(names.contains(&"mock_tool".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_tool_execution_caching() {
+        let registry = ToolRegistry::new();
+        registry.register::<MockTool>().await;
+        
+        let call = ToolCall {
+            name: "mock_tool".to_string(),
+            parameters: json!({"input": "test"}),
+        };
+        
+        // First execution (cache miss)
+        let res1 = registry.execute(&call).await.unwrap();
+        assert!(res1.success);
+        
+        // Second execution (cache hit)
+        let res2 = registry.execute(&call).await.unwrap();
+        assert_eq!(res1, res2);
+    }
+
+    #[tokio::test]
+    async fn test_generate_tools_prompt() {
+        let registry = ToolRegistry::new();
+        registry.register::<MockTool>().await;
+        
+        let prompt = registry.generate_tools_prompt().await;
+        assert!(prompt.contains("mock_tool"));
+        assert!(prompt.contains("A mock tool for testing"));
+    }
+}
