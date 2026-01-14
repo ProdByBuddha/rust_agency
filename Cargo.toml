@@ -97,7 +97,7 @@ tower-http = { version = "0.6.2", features = ["trace"] }
 tokio-stream = "0.1.18"
 
 # PAI Pure Rust Core
-pai-core = { path = "Personal_AI_Infrastructure/rust/pai-core" }
+pai-core = { path = "pai-core" }
 
 # Tor/Arti for Anonymous A2A
 arti-client = { path = "arti/crates/arti-client", features = ["full", "tokio", "native-tls"] }
