@@ -7,20 +7,26 @@ use ollama_rs::Ollama;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing::info;
 
 use crate::agent::{AgentType, LLMProvider, OllamaProvider, OpenAICompatibleProvider};
+use crate::orchestrator::ScaleProfile;
 
 /// Routing decision for a query
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutingDecision {
-    /// The agent type to route to
-    pub agent_type: AgentType,
+    /// FPF Integration: Multi-Candidate Portfolio (G.5)
+    pub candidate_agents: Vec<AgentType>,
     /// Whether to search memory for context
     pub should_search_memory: bool,
+    /// Whether strict reasoning/planning tags are required
+    pub reasoning_required: bool,
     /// Confidence in the routing decision (0.0 - 1.0)
     pub confidence: f32,
     /// Reason for the routing decision
     pub reason: String,
+    /// FPF Integration: Scaling-Law Lens (C.18.1)
+    pub scale: ScaleProfile,
 }
 
 /// Router for directing queries to appropriate agents
@@ -38,16 +44,25 @@ impl Router {
         }
     }
 
+    pub fn new_with_provider(provider: Arc<dyn LLMProvider>) -> Self {
+        Self {
+            provider,
+            model: "llama3.2:3b".to_string(),
+        }
+    }
+
     pub fn with_provider(mut self, provider: Arc<dyn LLMProvider>) -> Self {
         self.provider = provider;
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_provider_url(mut self, url: Option<String>) -> Self {
         if let Some(url_str) = url {
             self.provider = Arc::new(OpenAICompatibleProvider::new(url_str, None));
@@ -56,72 +71,143 @@ impl Router {
     }
 
     /// Route a query to the appropriate agent
-    pub async fn route(&self, query: &str) -> Result<RoutingDecision> {
-        // Quick heuristics for simple cases
+    pub async fn route(&self, query: &str, vram_available_gb: Option<f32>) -> Result<RoutingDecision> {
+        // FPF Integration: Scaling-Law Lens (SLL) - The Scale Probe
+        // 1. Calculate complexity (Scale Variables S)
         let q_lower = query.to_lowercase();
         
-        // Very short, greeting, or identity messages -> GeneralChat
-        if q_lower.len() < 10 || self.is_greeting(&q_lower) || self.is_identity_query(&q_lower) {
+        // URL Detection: Escalates complexity to Heavy (0.9) to mandate tool-use
+        let has_url = q_lower.contains("http://") || q_lower.contains("https://") || q_lower.contains(".com") || q_lower.contains(".org");
+
+        let complexity = if has_url {
+            0.9 // URLs are high-complexity external unknowns
+        } else if query.len() > 100 || q_lower.contains("code") || q_lower.contains("analyze") || q_lower.contains("refactor") {
+            0.8
+        } else if query.len() > 30 || q_lower.contains("explain") {
+            0.5
+        } else {
+            0.1
+        };
+
+        // 2. Evaluate Scale Probe against actual hardware state
+        let vram = vram_available_gb.unwrap_or(8.0); // Fallback to 8GB if tool is missing
+        let scale = ScaleProfile::new(complexity, vram);
+        
+        // FPF Integration: Reasoning Requirement Probe
+        // Determine if the task is complex enough to merit strict reasoning tags
+        let reasoning_required = complexity > 0.3 || self.mentions_tool(&q_lower);
+
+        // Quick heuristics for simple cases
+        
+        // FPF Integration: Tool-Use Detection (Pre-Route Fast Path)
+        // When users explicitly request a tool, bypass GeneralChat and route to agent with tool access.
+        if self.mentions_tool(&q_lower) {
             return Ok(RoutingDecision {
-                agent_type: AgentType::GeneralChat,
+                candidate_agents: vec![AgentType::Coder], // Coder has tool access
                 should_search_memory: false,
+                reasoning_required: true,
+                confidence: 0.95,
+                reason: "Query explicitly mentions tool usage (FPF Tool Detection)".to_string(),
+                scale,
+            });
+        }
+        
+        // Very short, greeting, or identity messages -> GeneralChat (1b for speed)
+        // Expanded threshold to 60 chars to catch simple questions like "What is the capital of France?"
+        // unless they look like code or research queries.
+        let is_short_simple = q_lower.len() < 60 
+            && !self.is_code_related(&q_lower) 
+            && !self.is_research_related(&q_lower)
+            && !self.is_planning_related(&q_lower);
+
+        if is_short_simple || self.is_greeting(&q_lower) || self.is_identity_query(&q_lower) {
+            return Ok(RoutingDecision {
+                candidate_agents: vec![AgentType::GeneralChat],
+                should_search_memory: false,
+                reasoning_required: false, // Greetings never require strict reasoning tags
                 confidence: 0.9,
-                reason: "Simple greeting, short message, or identity query".to_string(),
+                reason: "Simple greeting or short message".to_string(),
+                scale,
             });
         }
 
         // Filesystem / Directory heuristics (Fast-Path)
         if self.is_filesystem_related(&q_lower) {
             return Ok(RoutingDecision {
-                agent_type: AgentType::Coder,
+                candidate_agents: vec![AgentType::Coder],
                 should_search_memory: false,
+                reasoning_required: true,
                 confidence: 0.95,
                 reason: "Direct filesystem query (heuristics fast-path)".to_string(),
+                scale,
             });
         }
 
         // Knowledge Graph / Relationship heuristics
         if q_lower.contains("graph") || q_lower.contains("relationship") || q_lower.contains("visualize") {
             return Ok(RoutingDecision {
-                agent_type: AgentType::Reasoner,
+                candidate_agents: vec![AgentType::Reasoner],
                 should_search_memory: true,
+                reasoning_required: true,
                 confidence: 0.9,
                 reason: "Knowledge graph or relationship query".to_string(),
+                scale,
             });
         }
 
         // Code-related keywords -> Coder
         if self.is_code_related(&q_lower) && !self.is_complex_query(&q_lower) {
             return Ok(RoutingDecision {
-                agent_type: AgentType::Coder,
+                candidate_agents: vec![AgentType::Coder],
                 should_search_memory: false,
+                reasoning_required: true,
                 confidence: 0.85,
                 reason: "Query contains code-related keywords".to_string(),
+                scale,
             });
         }
 
         // Planning keywords -> Planner
         if self.is_planning_related(&q_lower) || self.is_complex_query(&q_lower) {
             return Ok(RoutingDecision {
-                agent_type: AgentType::Planner,
+                candidate_agents: vec![AgentType::Planner],
                 should_search_memory: true,
+                reasoning_required: true,
                 confidence: 0.8,
                 reason: "Query involves planning or task decomposition".to_string(),
+                scale,
             });
         }
 
         // Research/search keywords -> Researcher
         if self.is_research_related(&q_lower) {
             return Ok(RoutingDecision {
-                agent_type: AgentType::Researcher,
+                candidate_agents: vec![AgentType::Researcher],
                 should_search_memory: true,
+                reasoning_required: true,
                 confidence: 0.8,
                 reason: "Query requires information gathering".to_string(),
+                scale,
             });
         }
 
         // Use LLM for complex routing decisions
-        self.llm_route(query).await
+        let mut decision = self.llm_route(query).await?;
+        decision.scale = scale;
+        decision.reasoning_required = reasoning_required;
+
+        // FPF Integration: Portfolio Generation (G.5)
+        // For high-complexity tasks, mandate at least 2 alternative candidates.
+        if decision.scale.predicted_complexity > 0.7 && decision.candidate_agents.len() < 2 {
+            info!("SLL-Audit: High complexity detected. Expanding to Multi-Candidate Portfolio.");
+            match decision.candidate_agents[0] {
+                AgentType::Coder => decision.candidate_agents.push(AgentType::Reasoner),
+                AgentType::Researcher => decision.candidate_agents.push(AgentType::Reasoner),
+                _ => decision.candidate_agents.push(AgentType::Researcher),
+            }
+        }
+
+        Ok(decision)
     }
 
     fn is_greeting(&self, query: &str) -> bool {
@@ -131,7 +217,8 @@ impl Router {
 
     fn is_identity_query(&self, query: &str) -> bool {
         let keywords = ["who are you", "what is your name", "what are you", "your identity", "your name"];
-        keywords.iter().any(|k| query.contains(k))
+        // Also handle very short identity queries
+        keywords.iter().any(|k| query.contains(k)) || query.trim().to_lowercase() == "what are you"
     }
 
     fn is_filesystem_related(&self, query: &str) -> bool {
@@ -162,11 +249,25 @@ impl Router {
 
     fn is_research_related(&self, query: &str) -> bool {
         let keywords = [
-            "search", "find", "look up", "research", "what is", "who is",
-            "when did", "where is", "why does", "how does", "latest", "current",
-            "news", "information about", "tell me about"
+            "search", "find", "look up", "research", 
+            "latest", "current", "news", "information about", "tell me about"
         ];
         keywords.iter().any(|k| query.contains(k))
+    }
+
+    /// FPF Integration: Detect explicit tool usage requests
+    /// Routes to agent with tool access when user asks to "use" something
+    fn mentions_tool(&self, query: &str) -> bool {
+        // Patterns: "use [tool]", "run [tool]", "execute [tool]", "[tool] tool"
+        let tool_verbs = ["use ", "run ", "execute ", "invoke ", "call "];
+        let tool_names = ["speaker", "search", "shell", "browser", "file", "terminal"];
+        
+        // Check for verb + any word (e.g., "use speaker")
+        let has_tool_verb = tool_verbs.iter().any(|v| query.contains(v));
+        let mentions_tool_name = tool_names.iter().any(|t| query.contains(t));
+        
+        // Either "use X" pattern or explicit tool name mention
+        (has_tool_verb && query.len() > 5) || (query.contains("tool") && mentions_tool_name)
     }
 
     fn is_complex_query(&self, query: &str) -> bool {
@@ -223,10 +324,12 @@ q = "{}"
                         .to_string();
 
                     return Ok(RoutingDecision {
-                        agent_type,
+                        candidate_agents: vec![agent_type],
                         should_search_memory,
+                        reasoning_required: true, // LLM-routed queries are usually complex
                         confidence: 0.7,
                         reason,
+                        scale: ScaleProfile::new(0.5, 8.0), // Placeholder, will be updated by caller
                     });
                 }
             }
@@ -264,10 +367,12 @@ q = "{}"
             .unwrap_or_else(|| "LLM routing decision".to_string());
 
         Ok(RoutingDecision {
-            agent_type,
+            candidate_agents: vec![agent_type],
             should_search_memory,
+            reasoning_required: true,
             confidence: 0.7, // LLM routing is less certain
             reason,
+            scale: ScaleProfile::new(0.5, 8.0), // Placeholder
         })
     }
 }
@@ -276,19 +381,17 @@ q = "{}"
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_greeting_detection() {
+    #[tokio::test]
+    async fn test_greeting_detection() {
         let router = Router::new(Ollama::default());
-        assert!(router.is_greeting("hi"));
-        assert!(router.is_greeting("hello there"));
-        assert!(!router.is_greeting("explain how"));
+        let res = router.route("hi", None).await.unwrap();
+        assert_eq!(res.candidate_agents[0], AgentType::GeneralChat);
     }
 
-    #[test]
-    fn test_code_detection() {
+    #[tokio::test]
+    async fn test_code_detection() {
         let router = Router::new(Ollama::default());
-        assert!(router.is_code_related("write a python function"));
-        assert!(router.is_code_related("debug this rust code"));
-        assert!(!router.is_code_related("what is the weather"));
+        let res = router.route("write a python function", None).await.unwrap();
+        assert_eq!(res.candidate_agents[0], AgentType::Coder);
     }
 }

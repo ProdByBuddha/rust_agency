@@ -64,6 +64,7 @@ impl EpisodicMemory {
     }
 
     /// Add a system message
+    #[allow(dead_code)]
     pub fn add_system(&mut self, content: impl Into<String>) {
         self.add_turn(ConversationTurn {
             role: Role::System,
@@ -74,6 +75,7 @@ impl EpisodicMemory {
     }
 
     /// Add a tool output
+    #[allow(dead_code)]
     pub fn add_tool(&mut self, tool_name: impl Into<String>, output: impl Into<String>) {
         self.add_turn(ConversationTurn {
             role: Role::Tool,
@@ -132,6 +134,32 @@ impl EpisodicMemory {
             .join("\n\n")
     }
 
+    /// Format history as ChatML for native model compatibility
+    pub fn format_as_chatml(&self) -> String {
+        self.turns
+            .iter()
+            .map(|turn| {
+                let role = match turn.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::System => "system",
+                    Role::Tool => "tool",
+                };
+                let content = if let Role::Assistant = turn.role {
+                    if let Some(ref agent) = turn.agent {
+                        format!("[{}]: {}", agent, turn.content)
+                    } else {
+                        turn.content.clone()
+                    }
+                } else {
+                    turn.content.clone()
+                };
+                format!("<|im_start|>{}\n{}<|im_end|>", role, content)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Get the last N turns
     pub fn last_n(&self, n: usize) -> Vec<&ConversationTurn> {
         self.turns.iter().rev().take(n).rev().collect()
@@ -152,7 +180,24 @@ impl EpisodicMemory {
         self.turns.is_empty()
     }
 
+    /// Estimate total tokens in history
+    pub fn estimate_total_tokens(&self) -> usize {
+        self.turns.iter().map(|t| t.content.len() / 4).sum()
+    }
+
+    /// Get all turns for processing
+    pub fn get_turns(&self) -> Vec<ConversationTurn> {
+        self.turns.iter().cloned().collect()
+    }
+
+    /// Replace all turns (used after compaction)
+    pub fn replace_turns(&mut self, new_turns: Vec<ConversationTurn>) {
+        self.turns = new_turns.into();
+        self.trim_to_limits();
+    }
+
     /// Get the last user message
+    #[allow(dead_code)]
     pub fn last_user_message(&self) -> Option<&str> {
         self.turns
             .iter()
@@ -162,11 +207,13 @@ impl EpisodicMemory {
     }
 
     /// Serialize to JSON for persistence
+    #[allow(dead_code)]
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string_pretty(&self.turns.iter().collect::<Vec<_>>())
     }
 
     /// Load from JSON
+    #[allow(dead_code)]
     pub fn from_json(json: &str, max_turns: usize, max_tokens_estimate: usize) -> serde_json::Result<Self> {
         let turns: Vec<ConversationTurn> = serde_json::from_str(json)?;
         let mut memory = Self::new(max_turns, max_tokens_estimate);

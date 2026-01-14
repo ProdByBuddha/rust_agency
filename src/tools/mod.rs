@@ -13,9 +13,16 @@ mod system;
 mod dynamic;
 mod knowledge_graph;
 mod agency_control;
-mod bitnet;
+mod visualization;
+mod speaker_rs;
+mod science;
+mod models;
+mod vision;
+mod mcp;
+mod skills;
 
 pub use web_search::WebSearchTool;
+pub use speaker_rs::SpeakerRsTool;
 pub use code_exec::CodeExecTool;
 pub use memory_query::MemoryQueryTool;
 pub use artifact::ArtifactTool;
@@ -24,16 +31,21 @@ pub use codebase::CodebaseTool;
 pub use system::SystemTool;
 pub use knowledge_graph::KnowledgeGraphTool;
 pub use agency_control::AgencyControlTool;
-pub use bitnet::BitNetInferenceTool;
+pub use visualization::VisualizationTool;
+pub use science::ScienceTool;
+pub use models::ModelManager;
+pub use vision::VisionTool;
 pub use dynamic::{DynamicTool, ForgeTool};
+pub use mcp::{McpServer, McpProxyTool};
+pub use skills::{MarkdownSkill, SkillLoader};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::{Mutex, RwLock};
 
 /// Output from a tool execution
@@ -92,22 +104,32 @@ pub struct ToolCall {
     pub parameters: Value,
 }
 
-/// Trait for tools that can be called by agents
+/// Trait for tools that can be executed by agents
 #[async_trait]
 pub trait Tool: Send + Sync {
-    /// Get the name of this tool
-    fn name(&self) -> &str;
+    /// Get the unique name of the tool
+    fn name(&self) -> String;
     
-    /// Get a description of what this tool does
-    fn description(&self) -> &str;
+    /// Get a description of what the tool does
+    fn description(&self) -> String;
     
-    /// Get the JSON schema for this tool's parameters
-    fn parameters_schema(&self) -> Value;
+    /// Get the JSON schema for the tool's parameters
+    fn parameters(&self) -> Value;
+
+    /// Get the U.WorkScope (operational constraints) for this tool (FPF Principle)
+    /// This allows the agent to evaluate if the tool can handle the specific task.
+    fn work_scope(&self) -> Value {
+        // Default: Unconstrained
+        json!({
+            "status": "unconstrained",
+            "notes": "No explicit hardware or data constraints declared."
+        })
+    }
     
     /// Execute the tool with the given parameters
     async fn execute(&self, params: Value) -> Result<ToolOutput>;
-    
-    /// Whether this tool requires confirmation before execution
+
+    /// Whether this tool requires explicit human confirmation
     fn requires_confirmation(&self) -> bool {
         false
     }
@@ -117,18 +139,23 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
     cache: Arc<Mutex<HashMap<String, ToolOutput>>>,
+    custom_tools_dir: PathBuf,
+    standard_tools_dir: PathBuf,
 }
 
 impl ToolRegistry {
     /// Create a new empty registry
-    pub fn new() -> Self {
+    pub fn new(custom_dir: impl Into<PathBuf>, standard_dir: impl Into<PathBuf>) -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            custom_tools_dir: custom_dir.into(),
+            standard_tools_dir: standard_dir.into(),
         }
     }
 
     /// Register a tool
+    #[allow(dead_code)]
     pub async fn register<T: Tool + 'static + Default>(&self) {
         let tool = T::default();
         let mut tools = self.tools.write().await;
@@ -167,6 +194,19 @@ impl ToolRegistry {
         Ok(count)
     }
 
+    /// Register all tools from an MCP server
+    pub async fn register_mcp_server(&self, server: Arc<McpServer>) -> Result<usize> {
+        let tools = server.list_tools().await?;
+        let mut count = 0;
+        for tool_def in tools {
+            let proxy = Arc::new(McpProxyTool::new(server.clone(), tool_def));
+            let mut tools = self.tools.write().await;
+            tools.insert(proxy.name(), proxy);
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Get all tool names
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
@@ -174,6 +214,7 @@ impl ToolRegistry {
     }
 
     /// Generate a combined schema for all tools (for LLM prompt)
+    #[allow(dead_code)]
     pub async fn generate_tools_prompt(&self) -> String {
         let names = self.tool_names().await;
         self.generate_filtered_tools_prompt(&names).await
@@ -193,11 +234,18 @@ impl ToolRegistry {
 
         for name in names {
             let tool = &tools[name];
-            prompt.push_str(&format!("## {}\n", name));
-            prompt.push_str(&format!("Description: {}\n", tool.description()));
-            prompt.push_str(&format!("Parameters: {}\n\n", 
-                serde_json::to_string_pretty(&tool.parameters_schema()).unwrap_or_default()
+            // Use more compact formatting for tool definitions
+            prompt.push_str(&format!("- {}: {} (params: {})\n", 
+                name, 
+                tool.description(),
+                serde_json::to_string(&tool.parameters()).unwrap_or_default()
             ));
+
+            // FPF Integration: Surface the Capability WorkScope
+            let scope = tool.work_scope();
+            if scope["status"] != "unconstrained" {
+                prompt.push_str(&format!("  U.WorkScope (Constraints): {}\n", scope));
+            }
         }
         
         prompt
@@ -251,15 +299,54 @@ impl ToolRegistry {
     }
 
     /// Clear the tool cache
+    #[allow(dead_code)]
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.lock().await;
         cache.clear();
+    }
+
+    /// Promote a custom tool to the standard set
+    pub async fn promote_tool(&self, name: &str) -> Result<()> {
+        let tools = self.tools.read().await;
+        if let Some(_tool) = tools.get(name) {
+            // Check if it's a dynamic tool in the custom directory
+            let metadata_path = self.custom_tools_dir.join(format!("{}.json", name));
+            if metadata_path.exists() {
+                tracing::info!("🚀 Promoting tool '{}' to standard set.", name);
+                
+                // Ensure standard directory exists
+                if !self.standard_tools_dir.exists() {
+                    std::fs::create_dir_all(&self.standard_tools_dir)?;
+                }
+
+                // Move metadata
+                let new_metadata_path = self.standard_tools_dir.join(format!("{}.json", name));
+                std::fs::rename(&metadata_path, &new_metadata_path)?;
+
+                // Read metadata to find script path
+                let content = std::fs::read_to_string(&new_metadata_path)?;
+                let metadata: serde_json::Value = serde_json::from_str(&content)?;
+                
+                if let Some(script_path) = metadata["script_path"].as_str() {
+                    let old_script = self.custom_tools_dir.join(script_path);
+                    let new_script = self.standard_tools_dir.join(script_path);
+                    if old_script.exists() {
+                        std::fs::rename(old_script, new_script)?;
+                    }
+                }
+
+                return Ok(());
+            }
+            // If it's already in standard or built-in, do nothing
+            return Ok(());
+        }
+        Err(anyhow::anyhow!("Tool not found for promotion"))
     }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new("custom_tools", "standard_tools")
     }
 }
 
@@ -273,9 +360,9 @@ mod tests {
 
     #[async_trait]
     impl Tool for MockTool {
-        fn name(&self) -> &str { "mock_tool" }
-        fn description(&self) -> &str { "A mock tool for testing" }
-        fn parameters_schema(&self) -> Value { json!({"type": "object"}) }
+        fn name(&self) -> String { "mock_tool".to_string() }
+        fn description(&self) -> String { "A mock tool for testing".to_string() }
+        fn parameters(&self) -> Value { json!({"type": "object"}) }
         async fn execute(&self, params: Value) -> Result<ToolOutput> {
             Ok(ToolOutput::success(params, "Mock execution successful"))
         }

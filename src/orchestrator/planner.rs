@@ -56,6 +56,7 @@ impl Plan {
     }
 
     /// Get the next step to execute
+    #[allow(dead_code)]
     pub fn next_step(&self) -> Option<&PlanStep> {
         self.steps.get(self.current_step).filter(|s| !s.completed)
     }
@@ -88,6 +89,7 @@ impl Plan {
     }
 
     /// Mark the current step as complete
+    #[allow(dead_code)]
     pub fn complete_current_step(&mut self, output: impl Into<String>) {
         if let Some(step) = self.steps.get_mut(self.current_step) {
             step.completed = true;
@@ -100,6 +102,7 @@ impl Plan {
     }
 
     /// Get all completed steps
+    #[allow(dead_code)]
     pub fn completed_steps(&self) -> Vec<&PlanStep> {
         self.steps.iter().filter(|s| s.completed).collect()
     }
@@ -113,6 +116,7 @@ impl Plan {
     }
 
     /// Get a summary of the plan
+    #[allow(dead_code)]
     pub fn summary(&self) -> String {
         let step_summaries: Vec<String> = self.steps
             .iter()
@@ -145,11 +149,13 @@ impl Planner {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_provider(mut self, provider: Arc<dyn LLMProvider>) -> Self {
         self.provider = provider;
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
@@ -175,7 +181,46 @@ q = "{}"
         let system = Some(super::sns::get_sns_system_prompt());
         let content = self.provider.generate(&self.model, prompt, system).await?;
 
-        self.parse_plan(query, &content)
+        let mut plan = self.parse_plan(query, &content)?;
+
+        // SOTA: Plan-Aware Optimal Information Selection
+        // Audit the generated plan for critical assumptions and insert verification steps.
+        let selector = super::optimal_info::OptimalInfoSelector::new(self.provider.clone(), self.model.clone());
+        let plan_summary = plan.summary();
+        if let Ok(queries) = selector.select_minimal_queries(query, &plan_summary).await {
+            if !queries.is_empty() {
+                info!("Adding {} verification steps to plan based on Decision Sensitivity", queries.len());
+                // Insert verification steps at the beginning of the plan
+                let mut new_steps = Vec::new();
+                for (idx, q) in queries.into_iter().enumerate() {
+                    new_steps.push(PlanStep {
+                        step_num: idx + 1,
+                        description: format!("Verify assumption: {}", q.description),
+                        agent_type: AgentType::Reasoner,
+                        suggested_tools: vec![q.tool_call],
+                        expected_output: "Confirmed/Refuted assumption".to_string(),
+                        depends_on: vec![],
+                        completed: false,
+                        output: None,
+                    });
+                }
+                
+                // Shift existing steps
+                let offset = new_steps.len();
+                for mut step in plan.steps {
+                    step.step_num += offset;
+                    step.depends_on = step.depends_on.into_iter().map(|d| d + offset).collect();
+                    // If a step had no dependencies, make it depend on the last verification step
+                    if step.depends_on.is_empty() {
+                        step.depends_on.push(offset);
+                    }
+                    new_steps.push(step);
+                }
+                plan.steps = new_steps;
+            }
+        }
+
+        Ok(plan)
     }
 
     fn parse_plan(&self, goal: &str, response: &str) -> Result<Plan> {
@@ -330,6 +375,7 @@ q = "{}"
     }
 
     /// Refine a plan based on execution feedback
+    #[allow(dead_code)]
     pub async fn refine(&self, plan: &Plan, feedback: &str) -> Result<Plan> {
         let prompt = format!(
             r#"You are refining an existing plan based on execution feedback.

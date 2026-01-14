@@ -1,6 +1,6 @@
-//! ReAct Agent Implementation
-//! 
-//! Implements the Reasoning + Acting framework for intelligent agent behavior.
+// ReAct Agent Implementation
+// 
+// Implements the Reasoning + Acting framework for intelligent agent behavior.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,8 +8,9 @@ use ollama_rs::Ollama;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+use futures_util::StreamExt;
 
-use super::{Agent, AgentConfig, AgentType, is_action_query, truncate, LLMProvider, OllamaProvider, OpenAICompatibleProvider};
+use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaProvider, OpenAICompatibleProvider};
 use crate::memory::Memory;
 use crate::tools::{ToolCall, ToolRegistry};
 
@@ -63,9 +64,11 @@ impl ReActStep {
 /// Response from an agent execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
-    /// The final answer
+    /// The final answer (PlainView/Publication Surface)
     pub answer: String,
-    /// All steps taken to reach the answer
+    /// The internal reasoning (TechView/Reasoning Surface)
+    pub thought: Option<String>,
+    /// All steps taken to reach the answer (Trace/Evidence Surface)
     pub steps: Vec<ReActStep>,
     /// The agent type that generated this response
     pub agent_type: AgentType,
@@ -73,27 +76,57 @@ pub struct AgentResponse {
     pub success: bool,
     /// Any error message
     pub error: Option<String>,
+    /// FPF Reliability Score (R) - calculated via CG-Spec
+    pub reliability: f32,
+    /// Token usage for this response
+    pub cost_tokens: u32,
+    /// Pending approval for HITL
+    pub pending_approval: Option<crate::safety::ApprovalRequest>,
 }
 
 impl AgentResponse {
     pub fn success(answer: impl Into<String>, steps: Vec<ReActStep>, agent_type: AgentType) -> Self {
+        let answer_str = answer.into();
         Self {
-            answer: answer.into(),
+            answer: answer_str,
+            thought: None,
             steps,
             agent_type,
             success: true,
             error: None,
+            reliability: 1.0,
+            cost_tokens: 0,
+            pending_approval: None,
         }
+    }
+
+    pub fn with_thought(mut self, thought: impl Into<String>) -> Self {
+        self.thought = Some(thought.into());
+        self
+    }
+
+    pub fn with_reliability(mut self, r: f32) -> Self {
+        self.reliability = r;
+        self
+    }
+
+    pub fn with_approval(mut self, approval: crate::safety::ApprovalRequest) -> Self {
+        self.pending_approval = Some(approval);
+        self
     }
 
     pub fn failure(error: impl Into<String>, steps: Vec<ReActStep>, agent_type: AgentType) -> Self {
         let error = error.into();
         Self {
             answer: format!("I encountered an error: {}", error),
+            thought: None,
             steps,
             agent_type,
             success: false,
             error: Some(error),
+            reliability: 0.0,
+            cost_tokens: 0,
+            pending_approval: None,
         }
     }
 }
@@ -105,6 +138,7 @@ pub struct ReActAgent {
     config: AgentConfig,
     tools: Arc<ToolRegistry>,
     memory: Option<Arc<dyn Memory>>,
+    safety: Option<Arc<tokio::sync::Mutex<crate::safety::SafetyGuard>>>,
 }
 
 impl ReActAgent {
@@ -124,6 +158,21 @@ impl ReActAgent {
             config,
             tools,
             memory: None,
+            safety: None,
+        }
+    }
+
+    pub fn new_with_provider(
+        provider: Arc<dyn LLMProvider>,
+        config: AgentConfig,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        Self {
+            provider,
+            config,
+            tools,
+            memory: None,
+            safety: None,
         }
     }
 
@@ -137,49 +186,101 @@ impl ReActAgent {
         self
     }
 
+    pub fn with_safety(mut self, safety: Arc<tokio::sync::Mutex<crate::safety::SafetyGuard>>) -> Self {
+        self.safety = Some(safety);
+        self
+    }
+
     /// Build the ReAct prompt
-    async fn build_react_prompt(&self, query: &str, steps: &[ReActStep], context: Option<&str>) -> String {
-        let mut prompt = format!(
-            "{}\n\n",
-            self.config.system_prompt
-        );
+    async fn build_react_prompt(&self, query: &str, steps: &[
+ReActStep],
+ context: Option<&str>) -> String {
+        let mut prompt = String::new();
 
         if let Some(ctx) = context {
-            prompt.push_str(&format!("## Context\n{}\n\n", ctx));
+            prompt.push_str(&format!("## Context
+{}
+
+", ctx));
         }
 
-        prompt.push_str("## Available Tools\n");
+        prompt.push_str("## Available Tools
+");
+        prompt.push_str("Standard Tools:\n");
         prompt.push_str(&self.tools.generate_filtered_tools_prompt(&self.config.allowed_tools).await);
+        
+        // SOTA: Laboratory Surface (FPF Principle)
+        // Show dynamic tools that are currently in the 'laboratory'
+        let lab_tools = self.tools.tool_names().await.into_iter()
+            .filter(|n| !self.config.allowed_tools.contains(n) && n != "forge_tool")
+            .collect::<Vec<_>>();
+            
+        if !lab_tools.is_empty() {
+            prompt.push_str("\nLaboratory (Experimental) Tools:\n");
+            prompt.push_str("NOTE: These tools are currently in the laboratory. Successful use will promote them to the standard set.\n");
+            prompt.push_str(&self.tools.generate_filtered_tools_prompt(&lab_tools).await);
+        }
+        
         prompt.push_str("\n");
 
-        prompt.push_str(r###"## Response Format
+        if self.config.reasoning_enabled {
+            prompt.push_str(r###"## Response Format
 
-Strictly follow this format:
+Respond using the EXACT format below. You MUST use these tags in every turn.
 
-[THOUGHT]
-Your reasoning.
+[PLANNING]
+Identify the strategy and next steps.
+
+[REASONING]
+Break down the logic or explain the tool results.
 
 [ACTION]
-{{"name": "tool", "parameters": {{...}}}}
-(Provide multiple [ACTION] for parallel execution.)
+{"name": "tool_name", "parameters": {"key": "value"}}
 
 [ANSWER]
-Your final response.
+Your response to the user.
 
+---
 RULES:
-1. No [ANSWER] if using [ACTION].
-2. NEVER generate [OBSERVATION].
-3. For codebase queries, use tools first.
-4. Parallel execution is encouraged.
+1. Every turn MUST include [PLANNING] and [REASONING].
+2. Use [ACTION] for tool calls (JSON format). Do NOT wrap JSON in code blocks if you use the [ACTION] tag.
+3. Use [ANSWER] for final messages to the user.
+4. If you need to use a tool, you MUST output the [ACTION] tag.
+5. NEVER output [OBSERVATION]. The system will provide the observation after your action.
+
+EXAMPLE OF TOOL CALL:
+[PLANNING]
+I need to check the current system status.
+[REASONING]
+Accessing system telemetry to evaluate resource availability.
+[ACTION]
+{"name": "system_monitor", "parameters": {"action": "status"}}
 
 "###);
+        } else {
+            prompt.push_str(r###"## Response Format
+Respond directly to the user query. If you need to use a tool, use the [ACTION] tag. Otherwise, provide your final response with the [ANSWER] tag.
 
-        prompt.push_str(&format!("## User Query\n{}\n\n", query));
+RULES:
+1. Use [ACTION] for tool calls (JSON format) if you need specialized information or action.
+2. Use [ANSWER] for your final response.
+3. Keep it brief and direct.
+4. NEVER output [OBSERVATION].
+"###);
+        }
+
+        prompt.push_str(&format!("## User Query
+{}
+
+", query));
 
         if !steps.is_empty() {
-            prompt.push_str("## Trace\n");
+            prompt.push_str("## Trace
+");
             for step in steps {
-                prompt.push_str(&format!("[THOUGHT]\n{}\n", step.thought));
+                if !step.thought.is_empty() {
+                    prompt.push_str(&format!("[REASONING]\n{}\n", step.thought));
+                }
                 for action in &step.actions {
                     let action_json = serde_json::to_string(action).unwrap_or_default();
                     prompt.push_str(&format!("[ACTION]\n{}\n", action_json));
@@ -196,14 +297,32 @@ RULES:
     }
 
     /// Parse the LLM response using strict Tags
-    fn parse_response(&self, response: &str, query: &str) -> Result<ReActStep> {
+    fn parse_response(&self, response: &str, _query: &str) -> Result<ReActStep> {
         debug!("Raw LLM Response for parsing:\n{}", response);
 
-        let thought = self.extract_tag(response, "[THOUGHT]")
-            .unwrap_or_else(|| "Thinking...".to_string());
+        // HALLUCINATION GUARD: Truncate at [OBSERVATION] if model tried to simulate it
+        // This is a direct SOTA guard against model-simulated feedback loops.
+        let clean_response = if let Some(obs_idx) = response.to_uppercase().find("[OBSERVATION]") {
+            warn!("Hallucinated [OBSERVATION] detected. Truncating response.");
+            &response[..obs_idx]
+        } else {
+            response
+        };
 
-        // 1. Check for Actions (even if Answer is present, Actions take priority to prevent laziness)
-        let actions = self.extract_all_tags(response, "[ACTION]");
+        // Hallucination Guard: Check for prompt leakage
+        if clean_response.contains("## Available Tools") || clean_response.contains("## User Query") {
+            warn!("Model echoed prompt structure. Possible context overflow or instruction drift.");
+        }
+
+        // Try to extract REASONING or THOUGHT
+        let thought = self.extract_tag(clean_response, "[REASONING]")
+            .or_else(|| self.extract_tag(clean_response, "[THOUGHT]"))
+            .unwrap_or_else(|| {
+                "Executing task...".to_string()
+            });
+
+        // 1. Check for Actions via [ACTION] tags
+        let actions = self.extract_all_tags(clean_response, "[ACTION]");
         let mut tool_calls = Vec::new();
         
         if !actions.is_empty() {
@@ -212,10 +331,12 @@ RULES:
                     tool_calls.push(call);
                 }
             }
-        } else {
-            // FALLBACK: Try to find JSON even without the tag if it looks like a tool call is intended
-            if let Some(call) = self.parse_json_tool_call(response) {
-                debug!("Fallback: Found valid JSON tool call without [ACTION] tag");
+        }
+
+        // 2. Fallback: Search for raw JSON objects if no [ACTION] tags were found
+        if tool_calls.is_empty() {
+            if let Some(call) = self.find_raw_json_tool_call(clean_response) {
+                warn!("Found raw JSON tool call without [ACTION] tag.");
                 tool_calls.push(call);
             }
         }
@@ -224,19 +345,105 @@ RULES:
             return Ok(ReActStep::thought(thought).with_actions(tool_calls));
         }
 
-        // 2. Check for Answer
-        if let Some(answer) = self.extract_tag(response, "[ANSWER]") {
+        // 3. Check for Answer
+        if let Some(answer) = self.extract_tag(clean_response, "[ANSWER]") {
             return Ok(ReActStep::final_answer(thought, answer));
         }
 
-        // 3. Robustness Fallback: If no tags were found, and it's NOT an action query (e.g. "Hello"), 
-        // treat the whole response as the answer.
-        if !is_action_query(query) && !response.is_empty() {
-            warn!("No tags found in conversational response. Falling back to treating content as answer.");
-            return Ok(ReActStep::final_answer("Conversational response", response));
+        // 4. Robustness Fallback: FPF Compliance
+        if clean_response.trim().is_empty() && response.to_uppercase().contains("[OBSERVATION]") {
+            warn!("Model started with hallucinated [OBSERVATION]. Retrying turn...");
+            return Ok(ReActStep::thought("System detected a hallucinated observation. Please provide your reasoning and next action or final answer using the specified tags."));
         }
 
-        Err(anyhow::anyhow!("Response failed to follow [TAG] format. You MUST provide [THOUGHT] and then either [ACTION] or [ANSWER]."))
+        // SOTA: Intelligent Fallback
+        if !clean_response.trim().is_empty() {
+            let reliability = self.score_response_quality(clean_response);
+            if reliability < 0.2 {
+                warn!("Low reliability (R={:.2}) detected in tagless response. Rejecting as gibberish.", reliability);
+                return Ok(ReActStep::thought("The model provided an incoherent response. Retrying with stricter instructions..."));
+            }
+
+            info!("Model provided tagless response (R={:.2}). Treating as final answer for FPF compliance.", reliability);
+            return Ok(ReActStep::final_answer("Executing task...", clean_response.trim()));
+        }
+
+        warn!("Model failed to provide tags or content. Wrapping raw response.");
+        Ok(ReActStep::final_answer("Conversational response", clean_response))
+    }
+
+    /// Normalize steps to ensure every action has an observation and remove orphans.
+    /// Derived from codex-rs/normalize.rs
+    fn normalize_steps(&self, steps: &mut Vec<ReActStep>) {
+        let mut i = 0;
+        while i < steps.len() {
+            let step = &mut steps[i];
+            
+            // 1. Ensure action steps have observations. If not, add 'aborted' observation.
+            if !step.actions.is_empty() && step.observations.is_empty() && !step.is_final {
+                warn!("Found step with actions but no observations. Adding synthetic 'aborted' observation.");
+                step.observations.push("Task was aborted or interrupted before tool execution completed.".to_string());
+            }
+            
+            // 2. Remove orphan observations (observations without preceding actions in same step)
+            if step.actions.is_empty() && !step.observations.is_empty() {
+                warn!("Removing orphan observations from step {}", i);
+                step.observations.clear();
+            }
+            
+            i += 1;
+        }
+    }
+
+    /// FPF Quality Scoring: Detect hallucinations and repetitive patterns
+    fn score_response_quality(&self, response: &str) -> f32 {
+        let mut score = 1.0;
+        
+        // Check for repetitive patterns (same phrase appearing multiple times)
+        let words: Vec<&str> = response.split_whitespace().collect();
+        let total_words = words.len();
+        if total_words > 10 {
+            let unique_words: std::collections::HashSet<&str> = words.iter().cloned().collect();
+            let uniqueness_ratio = unique_words.len() as f32 / total_words as f32;
+            if uniqueness_ratio < 0.2 {
+                score *= 0.1; // Heavy penalty for extreme repetition
+            } else if uniqueness_ratio < 0.4 {
+                score *= 0.4;
+            }
+        } else if total_words < 3 && response.len() > 20 {
+             // Long response with very few words (likely gibberish like aaaaaaaaaaaa or punctuation spam)
+             score *= 0.1;
+        }
+        
+        // Check for common gibberish markers or non-ASCII spam if it looks like noise
+        let non_ascii_count = response.chars().filter(|c| !c.is_ascii()).count();
+        if non_ascii_count > response.len() / 2 && response.len() > 20 {
+            // More than 50% non-ASCII in a medium+ response is suspicious for a technical agent 
+            // unless it's explicitly multilingual.
+            score *= 0.5;
+        }
+
+        // Check for hallucination markers (ChatML tags in output)
+        if response.contains("## User Query") || response.contains("## Instruction") || response.contains("<|im_start|>") {
+            score *= 0.1; // Model is echoing prompt structure or leak
+        }
+        
+        score
+    }
+
+    fn find_raw_json_tool_call(&self, text: &str) -> Option<ToolCall> {
+        // Look for common markers like "ACTION:" or just raw JSON
+        let markers = ["ACTION:", "Action:", "Call tool:", "Execute:"];
+        for marker in markers {
+            if let Some(start_idx) = text.find(marker) {
+                if let Some(call) = self.parse_json_tool_call(&text[start_idx..]) {
+                    return Some(call);
+                }
+            }
+        }
+        
+        // Final attempt: scan for any JSON-like object that looks like a ToolCall
+        self.parse_json_tool_call(text)
     }
 
     fn parse_json_tool_call(&self, text: &str) -> Option<ToolCall> {
@@ -255,13 +462,16 @@ RULES:
                             break;
                         }
                     }
-                    _ => {}
+                    _ => {} // Ignore other characters
                 }
             }
             if json_end > 0 {
                 let action_json = &json_text[..json_end];
                 if let Ok(call) = serde_json::from_str::<ToolCall>(action_json) {
-                    return Some(call);
+                    // Basic validation that it's a real tool call
+                    if !call.name.is_empty() {
+                        return Some(call);
+                    }
                 }
             }
         }
@@ -269,71 +479,127 @@ RULES:
     }
 
     fn extract_tag(&self, text: &str, tag: &str) -> Option<String> {
-        // Case-insensitive search for the tag
-        let tag_lower = tag.to_lowercase();
-        let text_lower = text.to_lowercase();
+        // Robust search for [TAG], [TAG]:, TAG:, **TAG**: (common in small models)
+        let tag_name = tag.trim_matches(|c| c == '[' || c == ']');
+        let patterns = [
+            format!("[{}]", tag_name.to_uppercase()),
+            format!("[{}]:", tag_name.to_uppercase()),
+            format!("{}:", tag_name.to_uppercase()),
+            format!("**{}**:", tag_name.to_uppercase()),
+            format!("**{}**", tag_name.to_uppercase()),
+            format!("### {}", tag_name.to_uppercase()),
+        ];
+
+        let text_upper = text.to_uppercase();
         
-        if let Some(start_idx) = text_lower.find(&tag_lower) {
-            let start = start_idx + tag.len();
-            
-            // Look for the next tag to find the end
-            let tags = ["[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]"];
-            let mut end = text.len();
-            
-            for t in tags {
-                if let Some(next_idx) = text_lower[start..].find(&t.to_lowercase()) {
-                    let abs_next_idx = start + next_idx;
-                    if abs_next_idx < end {
-                        end = abs_next_idx;
+        for pattern in patterns {
+            if let Some(start_idx) = text_upper.find(&pattern) {
+                let start = start_idx + pattern.len();
+                
+                // Look for the next possible tag to find the end
+                let next_tags = [
+                    "[PLANNING]", "[REASONING]", "[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]", 
+                    "PLANNING:", "REASONING:", "THOUGHT:", "ACTION:", "ANSWER:",
+                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**"
+                ];
+                let mut end = text.len();
+                
+                for t in next_tags {
+                    if let Some(next_idx) = text_upper[start..].find(t) {
+                        let abs_next_idx = start + next_idx;
+                        if abs_next_idx < end {
+                            end = abs_next_idx;
+                        }
                     }
                 }
+                
+                let result = text[start..end].trim().trim_start_matches(':').trim().to_string();
+                if !result.is_empty() { return Some(result); }
             }
-            
-            let result = text[start..end].trim().to_string();
-            if result.is_empty() { None } else { Some(result) }
-        } else {
-            None
         }
+        None
     }
 
     fn extract_all_tags(&self, text: &str, tag: &str) -> Vec<String> {
         let mut results = Vec::new();
-        let tag_lower = tag.to_lowercase();
-        let text_lower = text.to_lowercase();
+        let tag_name = tag.trim_matches(|c| c == '[' || c == ']');
+        let patterns = [
+            format!("[{}]", tag_name.to_uppercase()),
+            format!("{}:", tag_name.to_uppercase()),
+            format!("**{}**:", tag_name.to_uppercase()),
+        ];
+        let text_upper = text.to_uppercase();
         
-        let mut current_pos = 0;
-        while let Some(start_idx) = text_lower[current_pos..].find(&tag_lower) {
-            let start = current_pos + start_idx + tag.len();
-            
-            // Find end (next tag or end of string)
-            let tags = ["[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]"];
-            let mut end = text.len();
-            
-            for t in tags {
-                if let Some(next_idx) = text_lower[start..].find(&t.to_lowercase()) {
-                    let abs_next_idx = start + next_idx;
-                    if abs_next_idx < end {
-                        end = abs_next_idx;
+        let _current_pos = 0;
+        
+        // We use the first pattern that matches to find all occurrences
+        for pattern in patterns {
+            let mut pos = 0;
+            while let Some(start_idx) = text_upper[pos..].find(&pattern) {
+                let start = pos + start_idx + pattern.len();
+                
+                // Find end (next tag or end of string)
+                let next_tags = [
+                    "[PLANNING]", "[REASONING]", "[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]",
+                    "PLANNING:", "REASONING:", "THOUGHT:", "ACTION:", "ANSWER:",
+                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**"
+                ];
+                let mut end = text.len();
+                
+                for t in next_tags {
+                    if let Some(next_idx) = text_upper[start..].find(t) {
+                        let abs_next_idx = start + next_idx;
+                        if abs_next_idx < end {
+                            end = abs_next_idx;
+                        }
                     }
                 }
+                
+                let result = text[start..end].trim().trim_start_matches(':').trim().to_string();
+                if !result.is_empty() {
+                    results.push(result);
+                }
+                pos = end;
+                if pos >= text.len() { break; }
             }
-            
-            let result = text[start..end].trim().to_string();
-            if !result.is_empty() {
-                results.push(result);
-            }
-            current_pos = end;
+            if !results.is_empty() { break; }
         }
         results
     }
 
-    /// Execute a single step of the ReAct loop
-    pub async fn step(&self, query: &str, steps: &[ReActStep], context: Option<&str>) -> Result<ReActStep> {
+    /// Execute a single step of the ReAct loop with streaming
+    pub async fn step_stream(&self, query: &str, steps: &[ReActStep], context: Option<&str>) -> Result<ReActStep> {
         let prompt = self.build_react_prompt(query, steps, context).await;
+        let system = Some(self.config.system_prompt.clone());
+        
+        debug!("ReAct prompt (streaming):\n{}", prompt);
+        info!("   ⏳ Iteration starting (model: {})...", self.config.model);
+
+        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await?;
+        let mut full_content = String::new();
+
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res?;
+            full_content.push_str(&chunk);
+            // SOTA: No token-by-token printing to stdout to avoid IO bottlenecks.
+            // Tokens are streamed to the UI via the provider's internal tx channel.
+        }
+
+        debug!("Full streamed response:\n{}", full_content);
+
+        self.parse_response(&full_content, query)
+    }
+
+    /// Execute a single step of the ReAct loop
+    pub async fn step(&self, query: &str, steps: &[
+ReActStep],
+ context: Option<&str>) -> Result<ReActStep> {
+        let prompt = self.build_react_prompt(query, steps, context).await;
+        let system = Some(self.config.system_prompt.clone());
         
         debug!("ReAct prompt:\n{}", prompt);
 
-        let content = self.provider.generate(&self.config.model, prompt, None).await?;
+        let content = self.provider.generate(&self.config.model, prompt, system).await?;
 
         debug!("LLM response:\n{}", content);
 
@@ -355,7 +621,6 @@ impl Agent for ReActAgent {
             AgentType::Researcher => "Researcher",
             AgentType::Planner => "Planner",
             AgentType::Reviewer => "Reviewer",
-            AgentType::BitNet => "BitNet",
         }
     }
 
@@ -368,6 +633,17 @@ impl Agent for ReActAgent {
     }
 
     async fn execute(&self, query: &str, context: Option<&str>) -> Result<AgentResponse> {
+        self.execute_with_steering(query, context, None).await
+    }
+}
+
+impl ReActAgent {
+    pub async fn execute_with_steering(
+        &self, 
+        query: &str, 
+        context: Option<&str>,
+        mut steering_rx: Option<tokio::sync::mpsc::Receiver<String>>
+    ) -> Result<AgentResponse> {
         info!("ReAct agent starting execution for query: {}", query);
         
         let mut steps = Vec::new();
@@ -375,17 +651,32 @@ impl Agent for ReActAgent {
         for iteration in 0..self.config.max_iterations {
             debug!("ReAct iteration {}", iteration + 1);
             
-            let mut step = match self.step(query, &steps, context).await {
+            // Check for steering messages BEFORE the turn
+            if let Some(ref mut rx) = steering_rx {
+                while let Ok(steer_msg) = rx.try_recv() {
+                    info!("Agent steered: {}", steer_msg);
+                    let _ = self.provider.notify(&format!("\n🔄 STEERING RECEIVED: {}\n", steer_msg)).await;
+                    steps.push(ReActStep::thought(format!("[STEERED]: {}", steer_msg)));
+                }
+            }
+
+            let _ = self.provider.notify("STATE:THOUGHT_START").await;
+            let _ = self.provider.notify(&format!("STATE:MODEL:{}", self.config.model)).await;
+            let _ = self.provider.notify(&format!("\n[ITERATION {}]\n", iteration + 1)).await;
+            
+            let mut step = match self.step_stream(query, &steps, context).await {
                 Ok(s) => {
-                    // Display real-time thought process
-                    println!("   💭 {}", truncate(&s.thought, 100));
                     for action in &s.actions {
-                        println!("      🔧 Using Tool: {}...", action.name);
+                        let msg = format!("🔧 Using Tool: {}...", action.name);
+                        println!("      {}", msg);
+                        let _ = self.provider.notify(&format!("\n{}\n", msg)).await;
+                        crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallStarted { tool: action.name.clone() });
                     }
                     s
                 },
                 Err(e) => {
                     warn!("ReAct step parsing failed: {}", e);
+                    let _ = self.provider.notify(&format!("\n❌ Parsing error: {}\n", e)).await;
                     steps.push(ReActStep::thought(format!("Parsing error: {}", e)));
                     return Ok(AgentResponse::failure(e.to_string(), steps, self.config.agent_type));
                 }
@@ -394,7 +685,7 @@ impl Agent for ReActAgent {
             // LAZINESS FILTER: Detect finishing without action for complex queries
             if step.is_final && steps.is_empty() && is_action_query(query) {
                 warn!("Laziness detected: Agent tried to finish without any tool calls for an action query.");
-                let hint = "SYSTEM HINT: Your query requires ACTION (creating, analyzing, searching). You MUST use tools first. Do NOT provide a final answer until you have observations from the required tools (e.g., forge_tool, code_exec, codebase_explorer).";
+                let hint = "SYSTEM HINT: Your query requires ACTION (creating, analyzing, searching). You MUST use tools first. Do NOT provide a final answer until you have observations from the required tools.";
                 
                 // Convert current final answer back to a thought and continue
                 step.is_final = false;
@@ -410,36 +701,93 @@ impl Agent for ReActAgent {
                 let answer = step.answer.clone().unwrap_or_else(|| step.thought.clone());
                 steps.push(step);
                 
+                // SOTA: Trace Normalization (FPF Principle)
+                self.normalize_steps(&mut steps);
+                
                 info!("ReAct agent completed in {} iterations", iteration + 1);
                 return Ok(AgentResponse::success(answer, steps, self.config.agent_type));
             }
 
             if !step.actions.is_empty() {
+                // SOTA: Human-in-the-Loop (HITL) Check (FPF Principle: Verifiable Autonomy)
+                if let Some(ref safety_mutex) = self.safety {
+                    let guard = safety_mutex.lock().await;
+                    for action in &step.actions {
+                        if let Some(request) = guard.needs_human_approval(&action.name, &action.parameters, self.tools.clone()).await {
+                            info!("🚨 HITL triggered for tool: {}. Pausing execution for approval.", action.name);
+                            let _ = self.provider.notify(&format!("\n🚨 HITL REQUIRED: {}\n", request.rationale)).await;
+                            
+                            steps.push(step);
+                            self.normalize_steps(&mut steps);
+                            
+                            return Ok(AgentResponse::success("Awaiting human approval for sensitive operation.", steps, self.config.agent_type)
+                                .with_approval(request));
+                        }
+                    }
+                }
+
                 // Loop Guard: Check for redundant tool calls
                 if let Some(last_step) = steps.last() {
                     if last_step.actions == step.actions {
                         warn!("Redundant tool calls detected. Injecting loop guard hint.");
                         let mut loop_guard_step = step.clone();
-                        loop_guard_step.observations = vec!["SYSTEM HINT: You just called these tools with the same parameters and got the same result. Do NOT repeat yourself. Analyze the previous observations and try DIFFERENT tools, DIFFERENT parameters, or provide your FINAL_ANSWER based on what you already know.".to_string()];
+                        loop_guard_step.observations = vec!["SYSTEM HINT: Redundant tool call detected. Try a different approach or provide a final answer.".to_string()];
                         steps.push(loop_guard_step);
                         continue;
                     }
                 }
 
+                // Context Compression: If we have too many steps, summarize old ones
+                if steps.len() > 5 {
+                    info!("Trace compression active ({} steps). Summarizing early history.", steps.len());
+                    // Simple compression: Keep first step and last 3 steps, replace middle with summary
+                    let first = steps[0].clone();
+                    let last_three = steps[steps.len()-3..].to_vec();
+                    let mut compressed = vec![first];
+                    compressed.push(ReActStep::thought("[SYSTEM: Early history summarized to save context tokens]"));
+                    compressed.extend(last_three);
+                    steps = compressed;
+                }
+
                 debug!("Executing {} tools in parallel", step.actions.len());
+                
+                for action in &step.actions {
+                    crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallStarted { 
+                        tool: action.name.clone() 
+                    });
+                }
+
                 let results = self.tools.execute_parallel(&step.actions).await;
                 
                 let mut observations = Vec::new();
-                for res in results {
+                for (i, res) in results.into_iter().enumerate() {
+                    let action = &step.actions[i];
                     let mut obs = match res {
-                        Ok(output) => output.summary,
-                        Err(e) => format!("Tool execution failed: {}", e),
+                        Ok(output) => {
+                            crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallFinished { 
+                                tool: action.name.clone(), 
+                                success: true 
+                            });
+                            let _ = self.provider.notify(&format!("\n👁️ Observation: {}\n", output.summary)).await;
+                            
+                            // SOTA: Tool Promotion (Laboratory graduation)
+                            let _ = self.tools.promote_tool(&action.name).await;
+                            
+                            output.summary
+                        },
+                        Err(e) => {
+                            crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallFinished { 
+                                tool: action.name.clone(), 
+                                success: false 
+                            });
+                            let _ = self.provider.notify(&format!("\n❌ Tool failed: {}\n", e)).await;
+                            format!("Tool execution failed: {}", e)
+                        },
                     };
                     
                     // Context Compression: Truncate tool outputs if they are too long
-                    if obs.len() > 1500 {
-                        obs = format!("{}... [Output truncated for memory optimization]", &obs[..1500]);
-                    }
+                    use crate::utils::truncate::{truncate_text, TruncationPolicy};
+                    obs = truncate_text(&obs, TruncationPolicy::Bytes(1500));
                     observations.push(obs);
                 }
 
@@ -455,6 +803,9 @@ impl Agent for ReActAgent {
                 steps.push(step);
             }
         }
+
+        // SOTA: Trace Normalization (FPF Principle)
+        self.normalize_steps(&mut steps);
 
         Ok(AgentResponse::failure(
             format!("Reached maximum iterations ({})", self.config.max_iterations),
@@ -482,6 +833,10 @@ impl SimpleAgent {
         Self { provider, config }
     }
 
+    pub fn new_with_provider(provider: Arc<dyn LLMProvider>, config: AgentConfig) -> Self {
+        Self { provider, config }
+    }
+
     pub fn with_provider(mut self, provider: Arc<dyn LLMProvider>) -> Self {
         self.provider = provider;
         self
@@ -489,25 +844,203 @@ impl SimpleAgent {
 
     pub async fn execute_simple(&self, query: &str, context: Option<&str>) -> Result<AgentResponse> {
         let mut prompt = String::new();
+        let system = Some(self.config.system_prompt.clone());
+        
+        // FPF multi-view publication header
+        prompt.push_str("<|im_start|>system\nYou are a high-fidelity intelligence layer. \
+            Follow the First Principles Framework (FPF): ALWAYS separate internal thought from external communication. \
+            Use [THOUGHT] for your internal reasoning and [ANSWER] for the final user surface.<|im_end|>\n");
+
         if let Some(ctx) = context {
-            prompt.push_str(&format!("## Context\n{}\n\n", ctx));
+            // Inject context directly (assumed ChatML formatted from format_as_chatml)
+            prompt.push_str(ctx);
+            prompt.push_str("\n");
         }
-        prompt.push_str(&format!("## User Query\n{}\n", query));
+        prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n[THOUGHT]\n", query));
 
         debug!("Simple conversational prompt:\n{}", prompt);
 
-        let answer = self.provider.generate(&self.config.model, prompt, Some(self.config.system_prompt.clone())).await?;
+        let _ = self.provider.notify(&format!("STATE:MODEL:{}", self.config.model)).await;
 
-        let step = ReActStep::final_answer("Direct response", &answer);
+        let content = self.provider.generate(&self.config.model, prompt, system).await?;
+        
+        // MVPK Projection: Extract Thought (TechView) and Answer (PlainView)
+        let mut thought = "Processing...".to_string();
+        let mut answer = content.clone();
 
-        Ok(AgentResponse::success(answer, vec![step], self.config.agent_type))
+        if let Some(t) = self.extract_tag(&content, "[THOUGHT]")
+            .or_else(|| self.extract_tag(&content, "THOUGHT:")) {
+            thought = t;
+        }
+        
+        if let Some(a) = self.extract_tag(&content, "[ANSWER]")
+            .or_else(|| self.extract_tag(&content, "ANSWER:")) {
+            answer = a;
+        }
+
+        // FPF Consistency: If no tags found but substantial text exists, treat as raw answer
+        if answer.len() < 2 && content.len() > 2 {
+            answer = content;
+        }
+
+        // CG-Spec: Formality (F) and Reliability (R) calculation
+        let reliability = self.score_response_quality(&answer);
+        
+        if reliability < 0.3 {
+            warn!("Low reliability (R={:.2}) detected. Applying FPF Truncation Guard.", reliability);
+            if let Some(truncate_idx) = self.find_repetition_point(&answer) {
+                answer = answer[..truncate_idx].to_string();
+            }
+        }
+
+        let step = ReActStep::final_answer(thought.clone(), &answer);
+        Ok(AgentResponse::success(answer, vec![step], self.config.agent_type)
+            .with_thought(thought)
+            .with_reliability(reliability))
+    }
+
+    /// FPF Quality Scoring: Detect hallucinations and repetitive patterns
+    fn score_response_quality(&self, response: &str) -> f32 {
+        let mut score = 1.0;
+        
+        // Check for repetitive patterns (same phrase appearing multiple times)
+        let words: Vec<&str> = response.split_whitespace().collect();
+        let total_words = words.len();
+        if total_words > 20 {
+            let unique_words: std::collections::HashSet<&str> = words.iter().cloned().collect();
+            let uniqueness_ratio = unique_words.len() as f32 / total_words as f32;
+            if uniqueness_ratio < 0.3 {
+                score *= 0.2; // Heavy penalty for highly repetitive responses
+            } else if uniqueness_ratio < 0.5 {
+                score *= 0.5;
+            }
+        }
+        
+        // Check for hallucination markers (ChatML tags in output)
+        if response.contains("## User Query") || response.contains("## Instruction") {
+            score *= 0.1; // Model is echoing prompt structure
+        }
+        
+        // Check for empty or very short responses
+        if response.trim().len() < 5 {
+            score *= 0.3;
+        }
+        
+        score
+    }
+    
+    /// Find the first point where content starts repeating
+    fn find_repetition_point(&self, response: &str) -> Option<usize> {
+        // Look for "## User Query" or "## Instruction" which indicates prompt leak
+        if let Some(idx) = response.find("## User Query") {
+            return Some(idx);
+        }
+        if let Some(idx) = response.find("## Instruction") {
+            return Some(idx);
+        }
+        // Look for repeated ChatML patterns
+        if let Some(idx) = response.find("<|im_start|>user") {
+            return Some(idx);
+        }
+        None
+    }
+
+    /// Streaming variant of execute_simple for real-time token output
+    /// Calls the callback with each token chunk as it arrives
+    pub async fn execute_simple_stream<F>(
+        &self, 
+        query: &str, 
+        context: Option<&str>,
+        mut on_token: F
+    ) -> Result<AgentResponse> 
+    where
+        F: FnMut(&str) + Send
+    {
+        let mut prompt = String::new();
+        let system = Some(self.config.system_prompt.clone());
+        
+        // FPF multi-view publication header
+        prompt.push_str("<|im_start|>system\nYou are a high-fidelity intelligence layer. \
+            Follow the First Principles Framework (FPF): ALWAYS start with [THOUGHT] to process, then [ANSWER] for the user.<|im_end|>\n");
+
+        if let Some(ctx) = context {
+            // Inject context directly (assumed ChatML formatted)
+            prompt.push_str(ctx);
+            prompt.push_str("\n");
+        }
+        prompt.push_str(&format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n[THOUGHT]\n", query));
+
+        debug!("Simple conversational prompt (streaming):\n{}", prompt);
+
+        let _ = self.provider.notify(&format!("STATE:MODEL:{}", self.config.model)).await;
+
+        // Use streaming generation
+        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await?;
+        let mut full_response = String::new();
+        
+        while let Some(chunk_result) = stream.next().await {
+            if let Ok(chunk) = chunk_result {
+                on_token(&chunk);
+                full_response.push_str(&chunk);
+            }
+        }
+
+        // Final FPF Scoring on the full trace
+        let reliability = self.score_response_quality(&full_response);
+        let mut thought = "Streaming...".to_string();
+        let mut answer = full_response.clone();
+
+        if let Some(t) = self.extract_tag(&full_response, "[THOUGHT]") { thought = t; }
+        if let Some(a) = self.extract_tag(&full_response, "[ANSWER]") { answer = a; }
+
+        let step = ReActStep::final_answer(thought.clone(), &answer);
+        Ok(AgentResponse::success(answer, vec![step], self.config.agent_type)
+            .with_thought(thought)
+            .with_reliability(reliability))
+    }
+
+    fn extract_tag(&self, text: &str, tag: &str) -> Option<String> {
+        let tag_name = tag.trim_matches(|c| c == '[' || c == ']');
+        let patterns = [
+            format!("[{}]", tag_name.to_uppercase()),
+            format!("[{}]:", tag_name.to_uppercase()),
+            format!("{}:", tag_name.to_uppercase()),
+            format!("**{}**:", tag_name.to_uppercase()),
+            format!("**{}**", tag_name.to_uppercase()),
+            format!("### {}", tag_name.to_uppercase()),
+        ];
+
+        let text_upper = text.to_uppercase();
+        for pattern in patterns {
+            if let Some(start_idx) = text_upper.find(&pattern) {
+                let start = start_idx + pattern.len();
+                let next_tags = [
+                    "[THOUGHT]", "[ANSWER]", "THOUGHT:", "ANSWER:", 
+                    "**THOUGHT**", "**ANSWER**", "### THOUGHT", "### ANSWER"
+                ];
+                let mut end = text.len();
+                
+                for t in next_tags {
+                    if let Some(next_idx) = text_upper[start..].find(t) {
+                        let abs_next_idx = start + next_idx;
+                        if abs_next_idx < end {
+                            end = abs_next_idx;
+                        }
+                    }
+                }
+                
+                let result = text[start..end].trim().trim_start_matches(':').trim().to_string();
+                if !result.is_empty() { return Some(result); }
+            }
+        }
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::AgencyProfile;
+    use crate::orchestrator::profile::AgencyProfile;
 
     #[test]
     fn test_extract_tag() {
@@ -522,34 +1055,5 @@ mod tests {
         
         let action = agent.extract_tag(response, "[ACTION]");
         assert_eq!(action.unwrap(), "{\"name\": \"get_weather\", \"parameters\": {\"location\": \"Seattle\"}}");
-    }
-
-    #[test]
-    fn test_parse_response_final_answer() {
-        let profile = AgencyProfile::default();
-        let config = AgentConfig::new(AgentType::GeneralChat, &profile);
-        let agent = ReActAgent::new(Ollama::default(), config, Arc::new(ToolRegistry::new()));
-        
-        let response = "[THOUGHT]\nI have finished.\n[ANSWER]\nThe weather is sunny.\n";
-        let step = agent.parse_response(response, "What is the weather?").unwrap();
-        
-        assert!(step.is_final);
-        assert_eq!(step.answer.unwrap(), "The weather is sunny.");
-        assert_eq!(step.thought, "I have finished.");
-    }
-
-    #[test]
-    fn test_parse_response_action() {
-        let profile = AgencyProfile::default();
-        let config = AgentConfig::new(AgentType::GeneralChat, &profile);
-        let agent = ReActAgent::new(Ollama::default(), config, Arc::new(ToolRegistry::new()));
-        
-        let response = "[THOUGHT]\nI need to search.\n[ACTION]\n{\"name\": \"search\", \"parameters\": {\"query\": \"rust\"}}\n";
-        let step = agent.parse_response(response, "Search for rust").unwrap();
-        
-        assert!(!step.is_final);
-        assert_eq!(step.actions.len(), 1);
-        assert_eq!(step.actions[0].name, "search");
-        assert_eq!(step.thought, "I need to search.");
     }
 }

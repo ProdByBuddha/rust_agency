@@ -49,16 +49,23 @@ impl DynamicTool {
 
 #[async_trait]
 impl Tool for DynamicTool {
-    fn name(&self) -> &str {
-        &self.metadata.name
+    fn name(&self) -> String {
+        self.metadata.name.clone()
     }
 
-    fn description(&self) -> &str {
-        &self.metadata.description
+    fn description(&self) -> String {
+        self.metadata.description.clone()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         self.metadata.parameters.clone()
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "custom",
+            "notes": "WorkScope depends on the dynamically loaded tool implementation."
+        })
     }
 
     async fn execute(&self, params: Value) -> Result<ToolOutput> {
@@ -147,27 +154,37 @@ impl ForgeTool {
 
 #[async_trait]
 impl Tool for ForgeTool {
-    fn name(&self) -> &str {
-        "forge_tool"
+    fn name(&self) -> String {
+        "forge_tool".to_string()
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> String {
         "Forge a new specialized tool by providing metadata and a script. \
          The new tool will be permanently available to the agency and CAN BE USED IMMEDIATELY in the next step. \
-         Use this when you need a specialized functionality that doesn't exist yet (e.g. specialized file parsing, data transformation, or API interaction)."
+         BY DEFAULT, tools should be forged in 'rust' unless specifically requested otherwise by the human or necessitated by complex logic. \
+         Use this when you need a specialized functionality that doesn't exist yet (e.g. specialized file parsing, data transformation, or API interaction).".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Unique name for the tool (snake_case)" },
                 "description": { "type": "string", "description": "What the tool does" },
                 "parameters": { "type": "object", "description": "JSON schema for tool parameters" },
-                "language": { "type": "string", "enum": ["python", "shell", "node", "rust"] },
+                "language": { "type": "string", "enum": ["python", "shell", "node", "rust"], "default": "rust" },
                 "code": { "type": "string", "description": "The actual script code" }
             },
             "required": ["name", "description", "parameters", "language", "code"]
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "highly_agential",
+            "capability": "metaprogramming (self-expansion)",
+            "safety": "high risk: requires review of forged logic",
+            "persistence": "forged tools are saved to disk"
         })
     }
 

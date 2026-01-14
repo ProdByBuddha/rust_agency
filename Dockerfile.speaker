@@ -1,0 +1,36 @@
+# Use native ARM64 Python image
+FROM python:3.11-slim
+
+# Force stdin, stdout and stderr to be totally unbuffered
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libasound2-dev \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Optimize pip for 16GB M2 Air: No cache and specific CPU wheels
+# Pin setuptools to avoid pkg_resources removal warnings
+RUN pip install --no-cache-dir --upgrade pip "setuptools<81" wheel && \
+    pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining dependencies
+RUN pip install --no-cache-dir \
+    "fastapi" \
+    "uvicorn" \
+    "pydantic" \
+    "soundfile" \
+    "librosa==0.11.0" \
+    "numpy==1.25.2" \
+    "chatterbox-tts==0.1.6"
+
+COPY speaker_server.py .
+
+EXPOSE 8001
+
+CMD ["python", "speaker_server.py"]

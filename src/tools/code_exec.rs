@@ -28,6 +28,7 @@ impl CodeExecTool {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
@@ -125,16 +126,16 @@ impl Default for CodeExecTool {
 
 #[async_trait]
 impl Tool for CodeExecTool {
-    fn name(&self) -> &str {
-        "code_exec"
+    fn name(&self) -> String {
+        "code_exec".to_string()
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> String {
         "Execute code in a sandboxed environment. Supports Python, JavaScript, Rust, and shell commands. \
-         Use this to run calculations, test code snippets, or perform automated tasks."
+         Use this to run calculations, test code snippets, or perform automated tasks.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -149,6 +150,19 @@ impl Tool for CodeExecTool {
                 }
             },
             "required": ["code", "language"]
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "local process (isolated but sharing host resources)",
+            "safety": "high (requires manual confirmation)",
+            "resource_limits": {
+                "timeout": format!("{}s", self.timeout_secs),
+                "max_output": format!("{} bytes", self.max_output_len)
+            },
+            "requirements": ["manual confirmation"]
         })
     }
 

@@ -8,23 +8,20 @@
 //! - Safety guardrails
 //! - Full session persistence
 
+use rust_agency::tools::McpServer;
 use anyhow::Result;
 use ollama_rs::Ollama;
-use std::io::{self, Write};
 use std::sync::Arc;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
 
-mod agent;
-mod memory;
-mod orchestrator;
-mod safety;
-mod tools;
-
-use memory::{Memory, VectorMemory, CodebaseIndexer, MemoryManager};
-use orchestrator::{Supervisor, SessionManager};
-use safety::SafetyGuard;
-use tools::{ToolRegistry, WebSearchTool, CodeExecTool, MemoryQueryTool, KnowledgeGraphTool, ArtifactTool, SandboxTool, CodebaseTool, SystemTool, ForgeTool, BitNetInferenceTool};
+use rust_agency::memory::{Memory, VectorMemory, MemoryManager};
+use rust_agency::orchestrator::{Supervisor, SessionManager, Speaker, profile::ProfileManager};
+use rust_agency::tools::{
+    Tool, ToolRegistry, WebSearchTool, CodeExecTool, MemoryQueryTool, 
+    KnowledgeGraphTool, ArtifactTool, SandboxTool, CodebaseTool, 
+    SystemTool, ForgeTool, VisualizationTool, 
+    SpeakerRsTool, ScienceTool, ModelManager
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION
@@ -36,6 +33,8 @@ struct AgencyConfig {
     memory_file: String,
     /// Path to session persistence file
     session_file: String,
+    /// Path to agency profile file
+    profile_file: String,
 }
 
 impl Default for AgencyConfig {
@@ -43,6 +42,7 @@ impl Default for AgencyConfig {
         Self {
             memory_file: "memory.json".to_string(),
             session_file: "session.json".to_string(),
+            profile_file: "agency_profile.json".to_string(),
         }
     }
 }
@@ -53,24 +53,39 @@ impl Default for AgencyConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load environment variables
+    // SOTA: Apply Process Hardening (codex-inspired)
+    rust_agency::safety::hardening::apply_hardening();
+
+    // SOTA: Professional Observability (OpenTelemetry)
+    let _otel_guard = rust_agency::utils::otel::init_telemetry("rust_agency")
+        .expect("Failed to initialize OpenTelemetry");
+
+    // Load environment variables IMMEDIATELY
     dotenv::dotenv().ok();
 
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::DEBUG)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    // Check for CLI arguments
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && (args[1] == "--visualize" || args[1] == "-v") {
+        let tool = VisualizationTool::new();
+        let params = serde_json::json!({
+            "output_file": args.get(2).map(|s| s.as_str()).unwrap_or("agency_isometric.json")
+        });
+        match tool.execute(params).await {
+            Ok(res) => {
+                println!("{}", res.summary);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Error generating visualization: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     println!("\n{}", "═".repeat(60));
     println!("🚀 SOTA Semi-Autonomous Agency v0.2.0");
     println!("{}", "═".repeat(60));
-    println!("Features: ReAct | Vector Memory | Multi-Agent | Planning | Persistence");
+    println!("Features: ReAct | Vector Memory | Multi-Agent | Planning | Telemetry");
     println!("{}\n", "═".repeat(60));
 
     let config = AgencyConfig::default();
@@ -81,49 +96,99 @@ async fn main() -> Result<()> {
             .expect("Failed to initialize memory system")
     );
     
-    // Semantic codebase indexing - run in background to avoid blocking startup
-    let indexer = CodebaseIndexer::new("src", memory.clone());
-    tokio::spawn(async move {
-        let _ = indexer.index_all().await;
-    });
-
-    let memory_count = memory.count().await.unwrap_or(0);
-    info!("Memory initialized with {} entries", memory_count);
-    println!("📚 Memory: {} stored entries", memory_count);
-
     // Initialize MemoryManager for resource tracking
     let manager = Arc::new(MemoryManager::new(memory.clone()));
 
-    // Initialize tools
-    let tools = Arc::new(ToolRegistry::new());
-    tools.register_instance(WebSearchTool::new()).await;
-    tools.register_instance(CodeExecTool::new()).await;
-    tools.register_instance(MemoryQueryTool::new(memory.clone())).await;
-    tools.register_instance(KnowledgeGraphTool::new(memory.clone())).await;
-    tools.register_instance(ArtifactTool::default()).await;
-    tools.register_instance(SandboxTool::default()).await;
-    tools.register_instance(CodebaseTool::default()).await;
-    tools.register_instance(BitNetInferenceTool::default()).await;
-    tools.register_instance(ForgeTool::new("custom_tools", tools.clone())).await;
-    tools.register_instance(SystemTool::new(manager.clone())).await;
-    
-    // Load existing custom tools
-    let _ = tools.load_dynamic_tools("custom_tools").await;
-    
-    println!("🔧 Tools: {}", tools.tool_names().await.join(", "));
+    // Primary LLM Provider: Use Remote Nexus (Llama 3.2 3B) to avoid reload lag
+    println!("🌐 Connecting to Remote Nexus Model Server (Llama 3.2 3B)...");
+    let provider: Arc<dyn rust_agency::agent::LLMProvider> = Arc::new(rust_agency::agent::RemoteNexusProvider::new());
 
     // Initialize session persistence
     let session_manager = SessionManager::new(&config.session_file);
 
+    // Initialize shared Speaker engine (Deduplicated SOTA)
+    let shared_speaker = Arc::new(tokio::sync::Mutex::new(Speaker::new()?));
+
+    // Initialize tools
+    let tools = Arc::new(ToolRegistry::default());
+    
+    // SOTA: Concurrent Tool Registration (FPF Principle: Rapid Capability Establishment)
+    tokio::join!(
+        tools.register_instance(WebSearchTool::new()),
+        tools.register_instance(CodeExecTool::new()),
+        tools.register_instance(MemoryQueryTool::new(memory.clone())),
+        tools.register_instance(KnowledgeGraphTool::new(memory.clone())),
+        tools.register_instance(ArtifactTool::default()),
+        tools.register_instance(SandboxTool::default()),
+        tools.register_instance(CodebaseTool::default()),
+        tools.register_instance(ModelManager),
+        tools.register_instance(SpeakerRsTool::new(shared_speaker.clone())),
+        tools.register_instance(VisualizationTool::new()),
+        tools.register_instance(ScienceTool::new()),
+        tools.register_instance(ForgeTool::new("custom_tools", tools.clone())),
+        tools.register_instance(SystemTool::new(manager.clone()))
+    );
+
+    // SOTA: Markdown-Based Skill Discovery (pi-mono-inspired)
+    if let Ok(skills) = rust_agency::tools::SkillLoader::discover_skills("skills").await {
+        for skill in skills {
+            let name = skill.name();
+            tools.register_instance(skill).await;
+            println!("📚 Discovered Skill: {}", name);
+        }
+    }
+
+    // SOTA: Dynamic MCP Server Integration
+    if let Ok(content) = std::fs::read_to_string("mcp_servers.json") {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(servers) = config["servers"].as_array() {
+                for server_cfg in servers {
+                    let name = server_cfg["name"].as_str().unwrap_or("unnamed");
+                    let command = server_cfg["command"].as_str().unwrap_or("");
+                    let args: Vec<String> = server_cfg["args"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+
+                    if !command.is_empty() {
+                        match McpServer::spawn(name, command, &args).await {
+                            Ok(server) => {
+                                match tools.register_mcp_server(server).await {
+                                    Ok(count) => println!("🔌 Connected to MCP Server '{}' ({} tools loaded)", name, count),
+                                    Err(e) => tracing::warn!("Failed to register tools from MCP server '{}': {}", name, e),
+                                }
+                            }
+                            Err(e) => tracing::warn!("Failed to spawn MCP server '{}': {}", name, e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // SOTA: Load all previously forged dynamic tools (Laboratory graduation)
+    let _ = tools.load_dynamic_tools("standard_tools").await;
+    if let Ok(count) = tools.load_dynamic_tools("custom_tools").await {
+        if count > 0 {
+            println!("🛠️  Loaded {} dynamic tools from laboratory ('custom_tools').", count);
+        }
+    }
+    let profile_manager = ProfileManager::new(&config.profile_file);
+    let profile = profile_manager.load().await.unwrap_or_default();
+    println!("👤 Agency Profile loaded: {}", profile.name);
+
     // Initialize supervisor
-    let ollama = Ollama::default();
-    let mut supervisor = Supervisor::new(ollama, tools.clone())
+    let mut supervisor = Supervisor::new_with_provider(provider, tools.clone())
         .with_memory(memory.clone())
         .with_session(session_manager)
+        .with_profile(profile)
         .with_max_retries(2);
 
-    // Activate continuous thought machine (BitNet)
-    let _ = supervisor.activate_background_thinking().await;
+    // NOTE: Background thinking (CTM) is disabled by default to save resources on 16GB M2 Air.
+    // To enable it, uncomment the following line or use the 'autonomous' command.
+    // let _ = supervisor.activate_background_thinking().await;
 
     // Restore previous session
     if let Err(e) = supervisor.load_session().await {
@@ -132,127 +197,9 @@ async fn main() -> Result<()> {
         println!("💾 Session restored from '{}'", config.session_file);
     }
 
-    // Initialize safety guard
-    let mut safety = SafetyGuard::new();
-
-    println!("\n💡 Commands: 'quit' | 'history' | 'clear' | 'autonomous' | 'bitnet'\n");
-
-    // Main interaction loop
-    loop {
-        print!("🤖 You: ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let query = input.trim();
-
-        if query.is_empty() {
-            continue;
-        }
-
-        // Handle special commands
-        match query.to_lowercase().as_str() {
-            "quit" | "exit" | "q" => {
-                println!("\n👋 Goodbye!\n");
-                break;
-            }
-            "history" => {
-                println!("\n📜 Conversation History:\n{}\n", supervisor.conversation_history());
-                continue;
-            }
-            "clear" => {
-                let _ = supervisor.clear_history().await;
-                safety.reset();
-                println!("\n🗑️  History and session cleared.\n");
-                continue;
-            }
-            "autonomous" => {
-                print!("🎯 Define the goal for the Continuous Thought Machine: ");
-                io::stdout().flush()?;
-                let mut goal = String::new();
-                io::stdin().read_line(&mut goal)?;
-                let goal = goal.trim();
-                
-                if goal.is_empty() { continue; }
-
-                println!("\n🚀 Launching Autonomous Mode...\n");
-                match supervisor.run_autonomous(goal).await {
-                    Ok(result) => {
-                        println!("✅ Final Autonomous Result:");
-                        println!("{}", result.answer);
-                    }
-                    Err(e) => println!("❌ Autonomous Machine Error: {}", e),
-                }
-                continue;
-            }
-            "bitnet" => {
-                print!("⚡ Quick thought prompt: ");
-                io::stdout().flush()?;
-                let mut p = String::new();
-                io::stdin().read_line(&mut p)?;
-                let p = p.trim();
-                if p.is_empty() { continue; }
-
-                println!("\n🚀 Fast BitNet Inference...\n");
-                let call = crate::tools::ToolCall {
-                    name: "bitnet_inference".to_string(),
-                    parameters: serde_json::json!({ "prompt": p, "task_type": "logic" }),
-                };
-                match tools.execute(&call).await {
-                    Ok(res) => println!("✅ BitNet Thought:\n{}", res.summary),
-                    Err(e) => println!("❌ BitNet Error: {}", e),
-                }
-                continue;
-            }
-            _ => {}
-        }
-
-        // Validate input safety
-        if let Err(e) = safety.validate_input(query) {
-            println!("\n⚠️  {}\n", e);
-            continue;
-        }
-
-        // Process the query
-        println!("\n⚙️  Processing...\n");
-
-        match supervisor.handle(query).await {
-            Ok(result) => {
-                // Show plan if used
-                if let Some(ref plan) = result.plan {
-                    println!("📊 Plan Progress: {:.0}%", plan.progress());
-                    for step in &plan.steps {
-                        let status = if step.completed { "✓" } else { "○" };
-                        println!("   {} Step {}: {} ({})", 
-                            status, step.step_num, 
-                            step.description,
-                            step.agent_type
-                        );
-                    }
-                    println!();
-                }
-
-                // Show reflections if any
-                if !result.reflections.is_empty() {
-                    println!("🔄 Reflections:");
-                    for reflection in &result.reflections {
-                        println!("   • {}", reflection);
-                    }
-                    println!();
-                }
-
-                // Show the answer
-                let status = if result.success { "✅" } else { "⚠️" };
-                println!("{} Response:", status);
-                println!("{}", "─".repeat(50));
-                println!("{}", result.answer);
-                println!("{}\n", "─".repeat(50));
-            }
-            Err(e) => {
-                println!("❌ Error: {}\n", e);
-            }
-        }
-    }
+    // Launch the professional FPF-aligned CLI with SHARED speaker
+    let mut cli = rust_agency::orchestrator::cli::AgencyCLI::new(supervisor, shared_speaker);
+    cli.run().await?;
 
     Ok(())
 }

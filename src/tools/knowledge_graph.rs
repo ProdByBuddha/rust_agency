@@ -34,15 +34,15 @@ impl KnowledgeGraphTool {
 
 #[async_trait]
 impl Tool for KnowledgeGraphTool {
-    fn name(&self) -> &str {
-        "knowledge_graph_viewer"
+    fn name(&self) -> String {
+        "knowledge_graph_viewer".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Visualizes distilled entity relationships from memory as a Mermaid diagram. Use this to understand the high-level connections the agency has learned."
+    fn description(&self) -> String {
+        "Visualizes distilled entity relationships from memory as a Mermaid diagram. Use this to understand the high-level connections the agency has learned.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -55,11 +55,20 @@ impl Tool for KnowledgeGraphTool {
         })
     }
 
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "internal memory graph",
+            "search_mode": "topological (entity-relationship)",
+            "data_scope": "local knowledge base"
+        })
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolOutput> {
         let limit = params["limit"].as_u64().unwrap_or(20) as usize;
 
-        // Search for knowledge graph entries
-        let results = self.memory.search("entity relationship knowledge graph distilled", limit * 5).await?;
+        // Search for knowledge graph entries (across all contexts for now)
+        let results = self.memory.search("entity relationship knowledge graph distilled", limit * 5, None, None).await?;
         
         let mut triples = Vec::new();
         for entry in results {

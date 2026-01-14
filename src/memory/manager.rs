@@ -24,6 +24,7 @@ pub struct MemoryManagerConfig {
     /// RAM usage percentage that triggers aggressive cleanup
     pub ram_critical_threshold: f64,
     /// Whether to automatically clean up cache on high RAM
+    #[allow(dead_code)]
     pub auto_cleanup: bool,
 }
 
@@ -51,9 +52,11 @@ pub struct ResourceStatus {
 
 /// Resource-aware manager for semantic and episodic memory
 pub struct MemoryManager {
+    #[allow(dead_code)]
     config: MemoryManagerConfig,
     system: Arc<Mutex<System>>,
     vector_memory: Arc<dyn Memory>,
+    #[allow(dead_code)]
     last_check: AtomicU64, // Timestamp in seconds
 }
 
@@ -119,6 +122,7 @@ impl MemoryManager {
     }
 
     /// Check current resource status and perform cleanup if necessary
+    #[allow(dead_code)]
     pub async fn monitor_and_optimize(&self) -> Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -150,15 +154,18 @@ impl MemoryManager {
     }
 
     /// Explicitly trigger memory persistence
+    #[allow(dead_code)]
     pub async fn persist_memory(&self) -> Result<()> {
         debug!("MemoryManager: Forcing memory persistence to disk.");
         self.vector_memory.persist().await
     }
 
     /// Internal cleanup logic
+    #[allow(dead_code)]
     async fn cleanup_internal(&self) -> Result<()> {
         info!("MemoryManager: Purging transient caches and triggering process GC.");
-        // In Rust, we mainly rely on dropping Arcs, but we can clear internal tool caches if added later.
+        // Clear vector memory in-memory cache to free up significant RAM
+        let _ = self.vector_memory.clear_cache().await;
         Ok(())
     }
 

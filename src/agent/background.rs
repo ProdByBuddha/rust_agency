@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ollama_rs::Ollama;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::time::{sleep, Duration};
 use tracing::{info, error};
 
@@ -14,6 +15,7 @@ pub struct BackgroundThoughtMachine {
     ctm: ContinuousThoughtMachine,
     memory: Arc<dyn Memory>,
     is_running: bool,
+    pause_flag: Arc<AtomicBool>,
 }
 
 impl BackgroundThoughtMachine {
@@ -31,12 +33,21 @@ impl BackgroundThoughtMachine {
             ctm,
             memory,
             is_running: false,
+            pause_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn with_cache(mut self, cache: Arc<LLMCache>) -> Self {
         self.ctm = self.ctm.with_cache(cache);
         self
+    }
+
+    pub fn pause(&self) {
+        self.pause_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.pause_flag.store(false, Ordering::SeqCst);
     }
 
     pub async fn start(&mut self) {
@@ -47,13 +58,19 @@ impl BackgroundThoughtMachine {
         
         let mut ctm = self.ctm.clone();
         let memory = self.memory.clone();
+        let pause = self.pause_flag.clone();
         
         tokio::spawn(async move {
             loop {
+                // Check if we should wait because the user is interacting
+                while pause.load(Ordering::SeqCst) {
+                    sleep(Duration::from_millis(500)).await;
+                }
+
                 let query = "Analyze recent interactions and codebase state. What is one technical improvement or architectural insight you can generate right now? Be extremely concise.";
                 
                 // Get some context from memory to ground the CTM
-                let context = match memory.search("recent interactions codebase technical architecture", 5).await {
+                let context = match memory.search("recent interactions codebase technical architecture", 5, None, None).await {
                     Ok(entries) => {
                         let ctx = entries.iter()
                             .map(|e| format!("[{:?}] {}", e.metadata.source, e.content))
@@ -63,6 +80,9 @@ impl BackgroundThoughtMachine {
                     }
                     Err(_) => None,
                 };
+
+                // Re-check pause before inference
+                if pause.load(Ordering::SeqCst) { continue; }
 
                 match ctm.unfold(query, context.as_deref()).await {
                     Ok(insight_answer) => {
@@ -89,10 +109,11 @@ impl BackgroundThoughtMachine {
         });
     }
 
+    #[allow(dead_code)]
     pub async fn run_cycle(&mut self) -> Result<()> {
         let query = "Analyze recent interactions and codebase state. What is one technical improvement or architectural insight you can generate right now? Be extremely concise.";
         
-        let context = match self.memory.search("recent interactions codebase technical architecture", 5).await {
+        let context = match self.memory.search("recent interactions codebase technical architecture", 5, None, None).await {
             Ok(entries) => {
                 let ctx = entries.iter()
                     .map(|e| format!("[{:?}] {}", e.metadata.source, e.content))

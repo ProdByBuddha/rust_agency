@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use sha2::{Sha256, Digest};
 use async_trait::async_trait;
 use crate::agent::LLMProvider;
+use futures_util::stream::BoxStream;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -56,6 +57,7 @@ impl LLMCache {
         responses.insert(key, response);
     }
 
+    #[allow(dead_code)]
     pub async fn clear(&self) {
         let mut responses = self.responses.write().await;
         responses.clear();
@@ -91,6 +93,25 @@ impl LLMProvider for CachedProvider {
         let response = self.inner.generate(model, prompt.clone(), system.clone()).await?;
         self.cache.set(model, &prompt, system.as_deref(), response.clone()).await;
         Ok(response)
+    }
+
+    async fn generate_stream(&self, model: &str, prompt: String, system: Option<String>) -> anyhow::Result<BoxStream<'static, anyhow::Result<String>>> {
+        if let Some(cached) = self.cache.get(model, &prompt, system.as_deref()).await {
+            tracing::debug!("LLM Cache Hit for model {}", model);
+            return Ok(Box::pin(futures_util::stream::once(async move { Ok(cached) })));
+        }
+
+        let model = model.to_string();
+        
+        let stream = self.inner.generate_stream(&model, prompt, system).await?;
+
+        // For now, CachedProvider::generate_stream will just not cache the result of a miss
+        // to avoid complexity with collecting chunks in a stream.
+        Ok(Box::pin(stream))
+    }
+
+    fn get_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner.get_lock()
     }
 }
 

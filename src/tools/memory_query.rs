@@ -24,17 +24,17 @@ impl MemoryQueryTool {
 
 #[async_trait]
 impl Tool for MemoryQueryTool {
-    fn name(&self) -> &str {
-        "memory_query"
+    fn name(&self) -> String {
+        "memory_query".to_string()
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> String {
         "Search your memory for past interactions, learned information, or context. \
          Use this when you need to recall previous conversations or find relevant information \
-         from past interactions."
+         from past interactions.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -52,6 +52,15 @@ impl Tool for MemoryQueryTool {
         })
     }
 
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "internal vector database",
+            "search_mode": "semantic similarity",
+            "data_scope": "local long-term memory"
+        })
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolOutput> {
         let query = params["query"]
             .as_str()
@@ -61,10 +70,24 @@ impl Tool for MemoryQueryTool {
             .as_u64()
             .unwrap_or(3)
             .min(10) as usize;
+        let kind_str = params["kind"].as_str();
+        
+        let kind = if let Some(k) = kind_str {
+            match k.to_lowercase().as_str() {
+                "technical" => Some(crate::orchestrator::Kind::Technical),
+                "evidence" => Some(crate::orchestrator::Kind::Evidence),
+                "strategic" => Some(crate::orchestrator::Kind::Strategic),
+                "operational" => Some(crate::orchestrator::Kind::Operational),
+                "governance" => Some(crate::orchestrator::Kind::Governance),
+                _ => None,
+            }
+        } else {
+            None
+        };
 
-        debug!("Querying memory for: {} (top {})", query, top_k);
+        debug!("Querying memory for: {} (top {}, kind: {:?})", query, top_k, kind);
 
-        match self.memory.search(query, top_k).await {
+        match self.memory.search(query, top_k, None, kind).await {
             Ok(entries) => {
                 if entries.is_empty() {
                     return Ok(ToolOutput::success_str(

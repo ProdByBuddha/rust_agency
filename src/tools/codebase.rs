@@ -49,28 +49,42 @@ impl Default for CodebaseTool {
 
 #[async_trait]
 impl Tool for CodebaseTool {
-    fn name(&self) -> &str {
-        "codebase_explorer"
+    fn name(&self) -> String {
+        "codebase_explorer".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Search and read the agency's own source code. Actions: 'list_files', 'read_file'. Use this to understand tool implementations or agent logic."
+    fn description(&self) -> String {
+        "Explore and analyze the current project's codebase. \n        Supports 'list_files', 'read_file', and 'search' operations.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list_files", "read_file"]
+                    "enum": ["list_files", "read_file", "search"],
+                    "description": "The action to perform"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Path to file (relative to src/)"
+                    "description": "File path (if action is 'read_file')"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query (if action is 'search')"
                 }
             },
             "required": ["action"]
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "local project root",
+            "access": "read-only",
+            "data_scope": "source code and configuration"
         })
     }
 

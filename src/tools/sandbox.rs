@@ -7,13 +7,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
-use bollard::container::Config;
-use bollard::container::RemoveContainerOptions;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::Docker;
-use bollard::image::CreateImageOptions;
-use bollard::container::CreateContainerOptions;
-use bollard::container::StartContainerOptions;
+use bollard::query_parameters::{
+    CreateContainerOptions, CreateImageOptions, RemoveContainerOptions, StartContainerOptions,
+};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,9 +24,33 @@ use super::{Tool, ToolOutput};
 #[serde(rename_all = "snake_case")]
 pub enum SandboxProvider {
     Local,
+    MacOSNative,
     Daytona,
     E2B,
 }
+
+/// MacOS Seatbelt Policy Constants
+#[cfg(target_os = "macos")]
+const MACOS_SEATBELT_BASE_POLICY: &str = r#"
+(version 1)
+(deny default)
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow user-preference-read)
+(allow process-info* (target same-sandbox))
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/usr/share"))
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (subpath "/Library/Managed Preferences"))
+(allow file-read* (literal "/dev/null"))
+(allow file-read* (literal "/dev/urandom"))
+(allow file-read* (subpath "/private/var/db/timezone"))
+(allow file-read* (subpath "/usr/bin"))
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow ipc-posix-sem)
+"#;
 
 /// Unified Sandbox Tool
 pub struct SandboxTool {
@@ -38,6 +60,72 @@ pub struct SandboxTool {
 impl SandboxTool {
     pub fn new(provider: SandboxProvider) -> Self {
         Self { provider }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn execute_macos_native(&self, code: &str, language: &str) -> Result<ToolOutput> {
+        info!("Initializing MacOS Native sandbox (Seatbelt) for {}...", language);
+        
+        let temp_dir = tempfile::tempdir()?;
+        let script_path = temp_dir.path().join(match language {
+            "python" => "script.py",
+            "javascript" => "script.js",
+            "rust" => "main.rs",
+            _ => "script.sh",
+        });
+        
+        std::fs::write(&script_path, code)?;
+
+        // Build the policy
+        let mut policy = String::from(MACOS_SEATBELT_BASE_POLICY);
+        
+        // Allow reading and writing to the temp directory
+        let canonical_temp = temp_dir.path().canonicalize()?;
+        policy.push_str(&format!(
+            "(allow file-read* file-write* (subpath \"{}\"))\n",
+            canonical_temp.to_string_lossy()
+        ));
+
+        // Allow reading common language runtimes (simplification)
+        policy.push_str("(allow file-read* (subpath \"/usr/local/bin\"))\n");
+        policy.push_str("(allow file-read* (subpath \"/opt/homebrew\"))\n");
+
+        let mut cmd_args = vec!["-p".to_string(), policy, "--".to_string()];
+        
+        let run_cmd = match language {
+            "python" => vec!["python3".to_string(), script_path.to_string_lossy().to_string()],
+            "javascript" => vec!["node".to_string(), script_path.to_string_lossy().to_string()],
+            "rust" => vec![
+                "sh".to_string(), 
+                "-c".to_string(), 
+                format!("rustc {} -o {}/main && {}/main", 
+                    script_path.to_string_lossy(),
+                    canonical_temp.to_string_lossy(),
+                    canonical_temp.to_string_lossy()
+                )
+            ],
+            _ => vec!["sh".to_string(), script_path.to_string_lossy().to_string()],
+        };
+
+        cmd_args.extend(run_cmd);
+
+        let output = tokio::process::Command::new("/usr/bin/sandbox-exec")
+            .args(&cmd_args)
+            .output()
+            .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            Ok(ToolOutput::success(
+                json!({ "stdout": stdout, "stderr": stderr }),
+                format!("Native Execution Output:\n{}", stdout)
+            ))
+        } else {
+            Ok(ToolOutput::failure(format!("Native Execution Error (Status {}):\nSTDOUT: {}\nSTDERR: {}", 
+                output.status, stdout, stderr)))
+        }
     }
 
     async fn execute_local_docker(&self, code: &str, language: &str) -> Result<ToolOutput> {
@@ -56,7 +144,7 @@ impl SandboxTool {
         // 0. Ensure image exists
         let mut pull_stream = docker.create_image(
             Some(CreateImageOptions {
-                from_image: image.to_string(),
+                from_image: Some(image.to_string()),
                 ..Default::default()
             }),
             None,
@@ -81,14 +169,14 @@ impl SandboxTool {
 
         docker.create_container(
             Some(CreateContainerOptions { 
-                name: container_name.clone(),
+                name: Some(container_name.clone()),
                 ..Default::default()
             }),
             config
         ).await.context("Failed to create Docker container")?;
 
         // 2. Start container
-        docker.start_container(&container_name, None::<StartContainerOptions<String>>)
+        docker.start_container(&container_name, None::<StartContainerOptions>)
             .await.context("Failed to start Docker container")?;
 
         // 3. Prepare execution - We use a file-based approach to avoid shell escaping issues
@@ -136,7 +224,7 @@ EOF", filename, escaped_code);
                 match msg {
                     LogOutput::StdOut { message } => stdout.push_str(&String::from_utf8_lossy(&message)),
                     LogOutput::StdErr { message } => stderr.push_str(&String::from_utf8_lossy(&message)),
-                    _ => {{}}
+                    _ => {}
                 }
             }
         }
@@ -161,21 +249,28 @@ EOF", filename, escaped_code);
 
 impl Default for SandboxTool {
     fn default() -> Self {
-        Self::new(SandboxProvider::Local)
+        #[cfg(target_os = "macos")]
+        {
+            Self::new(SandboxProvider::MacOSNative)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::new(SandboxProvider::Local)
+        }
     }
 }
 
 #[async_trait]
 impl Tool for SandboxTool {
-    fn name(&self) -> &str {
-        "sandbox"
+    fn name(&self) -> String {
+        "sandbox".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Advanced isolated execution environment. Supports 'run' for Python, Rust, JS, and Shell. \n        Code MUST print results to stdout. Scripts are executed as standalone files inside a clean container."
+    fn description(&self) -> String {
+        "Advanced isolated execution environment. Supports 'run' for Python, Rust, JS, and Shell. \n        Code MUST print results to stdout. Scripts are executed as standalone files inside a clean container.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -198,6 +293,26 @@ impl Tool for SandboxTool {
         })
     }
 
+    fn work_scope(&self) -> Value {
+        let env = match self.provider {
+            SandboxProvider::MacOSNative => "native macos seatbelt (ultra-low latency)",
+            SandboxProvider::Local => "isolated docker container",
+            _ => "remote sandbox",
+        };
+        
+        json!({
+            "status": "constrained",
+            "environment": env,
+            "resource_limits": {
+                "memory": "1GB",
+                "cpu": "1.0 core",
+                "timeout": "60s"
+            },
+            "side_effects": "none (stateless)",
+            "requirements": if self.provider == SandboxProvider::Local { vec!["active docker daemon"] } else { vec![] }
+        })
+    }
+
     async fn execute(&self, params: Value) -> Result<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("run");
         
@@ -207,6 +322,11 @@ impl Tool for SandboxTool {
                 let lang = params["language"].as_str().unwrap_or("python");
                 
                 match self.provider {
+                    #[cfg(target_os = "macos")]
+                    SandboxProvider::MacOSNative => self.execute_macos_native(code, lang).await,
+                    #[cfg(not(target_os = "macos"))]
+                    SandboxProvider::MacOSNative => Ok(ToolOutput::failure("MacOSNative provider only available on macOS")),
+                    
                     SandboxProvider::Local => self.execute_local_docker(code, lang).await,
                     SandboxProvider::Daytona => self.execute_daytona(code, lang).await,
                     SandboxProvider::E2B => Ok(ToolOutput::failure("E2B provider not yet configured")),

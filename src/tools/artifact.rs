@@ -55,34 +55,42 @@ impl Default for ArtifactTool {
 
 #[async_trait]
 impl Tool for ArtifactTool {
-    fn name(&self) -> &str {
-        "artifact_manager"
+    fn name(&self) -> String {
+        "artifact_manager".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Manage persistent files (artifacts). Actions: 'write', 'read', 'list', 'delete'. \
-         Use this to save generated code, reports, or data for later use."
+    fn description(&self) -> String {
+        "Manage artifacts (files, images, documents) generated or used by agents. \n        Supports 'save', 'load', 'list', and 'delete' operations.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Action to perform",
-                    "enum": ["write", "read", "list", "delete"]
+                    "enum": ["save", "load", "list", "delete"],
+                    "description": "The action to perform"
                 },
-                "filename": {
+                "name": {
                     "type": "string",
-                    "description": "Name of the file (required for write, read, delete)"
+                    "description": "The name/id of the artifact"
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write (required for write action)"
+                    "description": "Content to save (if action is 'save')"
                 }
             },
             "required": ["action"]
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "local filesystem (artifacts/ directory)",
+            "persistence": "permanent",
+            "data_types": ["text", "code", "json", "logs"]
         })
     }
 
@@ -94,10 +102,10 @@ impl Tool for ArtifactTool {
             .ok_or_else(|| anyhow::anyhow!("Missing required parameter: action"))?;
 
         match action {
-            "write" => {
-                let filename = params["filename"]
+            "save" => {
+                let filename = params["name"]
                     .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: filename"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: name"))?;
                 let content = params["content"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing required parameter: content"))?;
@@ -108,21 +116,21 @@ impl Tool for ArtifactTool {
                 
                 info!("Artifact written: {}", filename);
                 Ok(ToolOutput::success(
-                    json!({ "filename": filename, "bytes": content.len() }),
+                    json!({ "name": filename, "bytes": content.len() }),
                     format!("Successfully saved artifact: {}", filename)
                 ))
             }
-            "read" => {
-                let filename = params["filename"]
+            "load" => {
+                let filename = params["name"]
                     .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: filename"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: name"))?;
                 
                 let path = self.resolve_path(filename)?;
                 let content = fs::read_to_string(&path).await
                     .context(format!("Failed to read artifact: {}", filename))?;
                 
                 Ok(ToolOutput::success(
-                    json!({ "filename": filename, "content": content }),
+                    json!({ "name": filename, "content": content }),
                     format!("Content of {}:\n\n{}", filename, content)
                 ))
             }
@@ -150,9 +158,9 @@ impl Tool for ArtifactTool {
                 ))
             }
             "delete" => {
-                let filename = params["filename"]
+                let filename = params["name"]
                     .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: filename"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Missing required parameter: name"))?;
                 
                 let path = self.resolve_path(filename)?;
                 fs::remove_file(&path).await
@@ -160,7 +168,7 @@ impl Tool for ArtifactTool {
                 
                 info!("Artifact deleted: {}", filename);
                 Ok(ToolOutput::success(
-                    json!({ "filename": filename }),
+                    json!({ "name": filename }),
                     format!("Successfully deleted artifact: {}", filename)
                 ))
             }
@@ -184,15 +192,15 @@ mod tests {
         
         // Write
         tool.execute(json!({
-            "action": "write",
-            "filename": filename,
+            "action": "save",
+            "name": filename,
             "content": content
         })).await.unwrap();
         
         // Read
         let res = tool.execute(json!({
-            "action": "read",
-            "filename": filename
+            "action": "load",
+            "name": filename
         })).await.unwrap();
         
         assert!(res.success);
@@ -205,8 +213,8 @@ mod tests {
         let tool = ArtifactTool::new(temp_dir.path());
         
         tool.execute(json!({
-            "action": "write",
-            "filename": "f1.txt",
+            "action": "save",
+            "name": "f1.txt",
             "content": "c1"
         })).await.unwrap();
         
@@ -217,7 +225,7 @@ mod tests {
         // Delete
         tool.execute(json!({
             "action": "delete",
-            "filename": "f1.txt"
+            "name": "f1.txt"
         })).await.unwrap();
         
         let res_list_after = tool.execute(json!({"action": "list"})).await.unwrap();

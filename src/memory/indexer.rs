@@ -51,6 +51,8 @@ impl CodebaseIndexer {
                         dirs.push(path);
                     }
                 } else if self.is_source_file(&path) {
+                    // Throttle indexing to prevent hardware saturation
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     match self.index_file(&path).await? {
                         true => count += 1,
                         false => skipped += 1,

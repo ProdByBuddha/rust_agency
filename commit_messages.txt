@@ -1,0 +1,23 @@
+update
+
+feat: Implement native Candle LLM provider, enhance speaker tool with direct initialization and synchronization, and add streaming cache support.
+
+feat: introduce interactive CLI for agency management and add a new science tool
+
+feat: introduce LLMProvider dependency injection for agents and orchestrators, add FPF enum traits, and update e2e tests.
+
+feat: Add FPF logic and TGA E2E tests, improve FPF characteristic aggregation, and refactor `TaskSignature` fields.
+
+feat: Introduce characteristic, calculi, SoS-LOG bundle, and SoTA pack authoring components, and extend service structures.
+
+feat: introduce modules for parity benchmarking, multi-method dispatch, evidence graphs, and multi-view publication kit.
+
+feat: Implement candidate variant generation and comparability governance specifications, enhancing related enums with Hash support.
+
+feat: Implement Unification Suite (UTS) with contextual lexicon, cell alignment, and validation harness.
+
+feat: Introduce modules for task signatures, agent tools, ethics, and SOS logging, alongside archive configuration.
+
+feat: Introduce new CAL, CHR, LOG, TGA, and Q-Bundle components and add characteristics to holons.
+
+feat: Implement speaker server with ONNX T3 transformer export, new FPF framework, and updates to core agency components.

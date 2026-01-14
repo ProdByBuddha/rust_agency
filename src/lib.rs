@@ -12,6 +12,9 @@ pub mod agent;
 pub mod tools;
 pub mod orchestrator;
 pub mod safety;
+pub mod fpf;
+pub mod models;
+pub mod utils;
 
 // Re-exports for convenience
 pub use agent::AgentType;

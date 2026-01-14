@@ -10,15 +10,21 @@ mod background;
 mod provider;
 mod ctm;
 mod cache;
+pub mod nqd;
+pub mod speaker_rs;
+pub mod rl;
+pub mod training;
 
+pub use speaker_rs::Speaker;
 pub use react::{ReActAgent, ReActStep, AgentResponse, SimpleAgent};
 pub use reflection::Reflector;
 pub use types::{AgentType, AgentConfig};
 pub use autonomous::AutonomousMachine;
 pub use background::BackgroundThoughtMachine;
 pub use ctm::ContinuousThoughtMachine;
-pub use provider::{LLMProvider, OllamaProvider, OpenAICompatibleProvider};
+pub use provider::{LLMProvider, OllamaProvider, OpenAICompatibleProvider, CandleProvider, RemoteNexusProvider, PublishingProvider};
 pub use cache::{LLMCache, CachedProvider};
+pub use nqd::NQDPortfolio;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,15 +33,19 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Agent: Send + Sync {
     /// Get the agent type
+    #[allow(dead_code)]
     fn agent_type(&self) -> AgentType;
     
     /// Get the agent's name
+    #[allow(dead_code)]
     fn name(&self) -> &str;
     
     /// Get the agent's system prompt
+    #[allow(dead_code)]
     fn system_prompt(&self) -> &str;
     
     /// Get the model to use for this agent
+    #[allow(dead_code)]
     fn model(&self) -> &str;
     
     /// Execute a query and return a response
@@ -56,12 +66,14 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Helper to check if a query likely requires tool use
 pub fn is_action_query(query: &str) -> bool {
     let q = query.to_lowercase();
     let action_keywords = [
-        "create", "write", "search", "analyze", "run", "execute", "list", 
-        "find", "build", "forge", "calculate", "read", "check", "entropy"
+        "create", "write", "search", "find", "analyze", "list", "run", "execute", 
+        "debug", "fix", "refactor", "index", "show", "what is in", "contents",
+        "http://", "https://", ".com", ".org", ".net", ".io"
     ];
-    action_keywords.iter().any(|k| q.contains(k))
+    action_keywords.iter().any(|&k| q.contains(k))
 }
 

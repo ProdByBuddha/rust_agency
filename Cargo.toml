@@ -11,17 +11,52 @@ anyhow = "1.0"
 tokio = { version = "1.48", features = ["full"] }
 async-trait = "0.1"
 futures-util = "0.3"
+futures = "0.3"
 
 # LLM integration
-ollama-rs = { version = "0.3", features = ["default"] }
+ollama-rs = { version = "0.3", features = ["default", "stream"] }
+
+# Use LOCAL Candle for direct development and Metal optimizations
+candle-core = { path = "../candle/candle-core", features = ["metal", "accelerate"] }
+candle-transformers = { path = "../candle/candle-transformers", features = ["metal"] }
+candle-nn = { path = "../candle/candle-nn", features = ["metal"] }
+candle-onnx = { path = "../candle/candle-onnx" }
+hf-hub = "0.4.0"
 
 # Memory system - Vector DB + Embeddings
 chromadb = "0.3"
 fastembed = "4"
 
+# ML Inference
+ort = { version = "2.0.0-rc.9", features = ["coreml"] }
+tokenizers = "0.20"
+ndarray = "0.15.6"
+ndarray-rand = "0.14"
+rand = "0.8"
+safetensors = "0.4"
+half = "2.4"
+rustfft = "6.2"
+
+# Audio Playback & Input
+rodio = "0.17"
+hound = "3.5"
+cpal = "0.15"
+rubato = "0.14"
+byteorder = "1.5"
+
+# Vision & Capture
+nokhwa = { version = "0.10", features = ["input-native"] }
+screenshots = "0.8"
+image = "0.24"
+
+# Peripheral Access & System Awareness
+nusb = "0.1"
+serialport = "4.3"
+
 # Serialization and schema
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 schemars = "0.8"
 
 # HTTP client for web search tool
@@ -33,9 +68,17 @@ chrono = { version = "0.4", features = ["serde"] }
 sysinfo = "0.37"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.27"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.26"
 urlencoding = "2.1"
 html-escape = "0.2"
 libc = "0.2"
+lazy_static = "1.4"
+pdf-extract = "0.7.2"
+ratatui = "0.29.0"
+crossterm = "0.28.1"
 
 # Rate limiting for safety
 governor = "0.8"
@@ -43,6 +86,17 @@ e2b-sdk = "0.1.1"
 dotenv = "0.15.0"
 daytona-client = "0.5.0"
 bollard = "0.19.4"
+base64 = "0.22"
+tempfile = "3.10"
+fs2 = "0.4"
+axum = { version = "0.8.8", features = ["ws", "macros"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.2", features = ["trace"] }
+tokio-stream = "0.1.18"
+
+[[bin]]
+name = "nexus_server"
+path = "src/bin/nexus_server.rs"
 
 [dev-dependencies]
 tempfile = "3.23.0"

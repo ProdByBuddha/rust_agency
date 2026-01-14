@@ -120,30 +120,40 @@ struct SearchResult {
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &str {
-        "web_search"
+    fn name(&self) -> String {
+        "web_search".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Search the web for information. Use this when you need to find current information, \
-         facts, or data that may not be in your training data."
+    fn description(&self) -> String {
+        "Search the web for current information, news, or technical documentation. \n        Returns a list of search results with titles, snippets, and URLs.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query to look up"
+                    "description": "The search query"
                 },
-                "num_results": {
+                "max_results": {
                     "type": "integer",
-                    "description": "Number of results to return (default: 5, max: 10)",
-                    "default": 5
+                    "description": "Maximum number of results to return (default: 5)",
+                    "minimum": 1,
+                    "maximum": 10
                 }
             },
             "required": ["query"]
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "external internet",
+            "network": "required (active internet connection)",
+            "side_effects": "none",
+            "data_freshness": "real-time"
         })
     }
 

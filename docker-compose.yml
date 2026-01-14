@@ -1,0 +1,18 @@
+services:
+  speaker:
+    build:
+      context: .
+      dockerfile: Dockerfile.speaker
+    container_name: agency-speaker
+    ports:
+      - "8001:8001"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      # Mount the HF cache so we don't redownload models inside the container
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    restart: unless-stopped

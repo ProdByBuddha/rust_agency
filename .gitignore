@@ -1,4 +1,65 @@
+# Rust
 /target
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+/speak_venv/
+
+# Environment
+.env
+
+# Logs
+*.log
+speaker_server.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project Specific
+.fastembed_cache/
+.serena/
+/artifacts/chatterbox/.cache/
+/custom_tools/
 /docs/sns/
-/custom_tools/*
-.fastembad_cache/
+
+# Agent State / Memory
+agency_profile.json
+memory.json
+session.json
+
+# IDEs
+.vscode/
+.idea/
+
+Cargo.lock
+*.onnx*
+*.safetensors
+
+# Large Model Artifacts
+*.onnx
+*.safetensors
+*.wav
+
+# Large Data Files
+data/*.pdf

@@ -1,0 +1,194 @@
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use crate::tools::{Tool, ToolOutput};
+use anyhow::Result;
+
+#[derive(Default)]
+pub struct VisualizationTool;
+
+impl VisualizationTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for VisualizationTool {
+    fn name(&self) -> String {
+        "visualization_tool".to_string()
+    }
+
+    fn description(&self) -> String {
+        "Generates a FossFLOW isometric diagram JSON of the current agency architecture.".to_string()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "output_file": {
+                    "type": "string",
+                    "description": "Optional name for the output JSON file",
+                    "default": "agency_isometric.json"
+                }
+            }
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "constrained",
+            "environment": "local project root",
+            "side_effects": "creates or overwrites a local JSON file",
+            "requirements": ["write access to current directory"]
+        })
+    }
+
+    async fn execute(&self, parameters: Value) -> Result<ToolOutput> {
+        let output_file = parameters["output_file"].as_str().unwrap_or("agency_isometric.json");
+
+        let diagram = json!({
+            "title": "SOTA Semi-Autonomous Agency Architecture",
+            "items": [
+                {
+                    "id": "user",
+                    "type": "isoflow__person",
+                    "position": { "x": 0, "y": 200 },
+                    "name": "User",
+                    "description": "Human interaction point"
+                },
+                {
+                    "id": "supervisor",
+                    "type": "isoflow__api",
+                    "position": { "x": 200, "y": 200 },
+                    "name": "Supervisor",
+                    "description": "Central orchestrator & routing"
+                },
+                {
+                    "id": "safety_guard",
+                    "type": "isoflow__shield",
+                    "position": { "x": 100, "y": 200 },
+                    "name": "Safety Guard",
+                    "description": "Input validation & content filtering"
+                },
+                {
+                    "id": "planner",
+                    "type": "isoflow__analytics",
+                    "position": { "x": 200, "y": 100 },
+                    "name": "Planner",
+                    "description": "Task decomposition"
+                },
+                {
+                    "id": "worker_agent",
+                    "type": "isoflow__microservice",
+                    "position": { "x": 400, "y": 150 },
+                    "name": "Worker Agent",
+                    "description": "ReAct reasoning loop"
+                },
+                {
+                    "id": "autonomous_machine",
+                    "type": "isoflow__microservice",
+                    "position": { "x": 400, "y": 250 },
+                    "name": "Autonomous Machine",
+                    "description": "Self-directed goal achievement"
+                },
+                {
+                    "id": "code_exec",
+                    "type": "isoflow__microservice",
+                    "position": { "x": 550, "y": 400 },
+                    "name": "Code Execution",
+                    "description": "Sandboxed Python/Bash execution"
+                },
+                {
+                    "id": "ollama",
+                    "type": "isoflow__server",
+                    "position": { "x": 400, "y": 50 },
+                    "name": "Ollama LLM",
+                    "description": "Local model provider"
+                }
+            ],
+            "connectors": [
+                {
+                    "id": "c1",
+                    "from": "user",
+                    "to": "safety_guard",
+                    "name": "Input Query"
+                },
+                {
+                    "id": "c2",
+                    "from": "safety_guard",
+                    "to": "supervisor",
+                    "name": "Validated Request"
+                },
+                {
+                    "id": "c3",
+                    "from": "supervisor",
+                    "to": "planner",
+                    "name": "Complex Tasks"
+                },
+                {
+                    "id": "c4",
+                    "from": "supervisor",
+                    "to": "worker_agent",
+                    "name": "Task Assignment"
+                },
+                {
+                    "id": "c5",
+                    "from": "supervisor",
+                    "to": "autonomous_machine",
+                    "name": "Goal Delegation"
+                },
+                {
+                    "id": "c6",
+                    "from": "worker_agent",
+                    "to": "vector_memory",
+                    "name": "Context Retrieval"
+                },
+                {
+                    "id": "c7",
+                    "from": "worker_agent",
+                    "to": "tool_registry",
+                    "name": "Tool Call"
+                },
+                {
+                    "id": "c8",
+                    "from": "tool_registry",
+                    "to": "web_search",
+                    "name": "Search"
+                },
+                {
+                    "id": "c9",
+                    "from": "tool_registry",
+                    "to": "code_exec",
+                    "name": "Execute"
+                },
+                {
+                    "id": "c11",
+                    "from": "worker_agent",
+                    "to": "ollama",
+                    "name": "Inference"
+                },
+                {
+                    "id": "c12",
+                    "from": "autonomous_machine",
+                    "to": "ollama",
+                    "name": "Inference"
+                }
+            ],
+            "colors": [
+                { "id": "blue", "value": "#0066cc" },
+                { "id": "green", "value": "#00aa00" }
+            ],
+            "views": [],
+            "fitToScreen": true
+        });
+
+        let json_str = serde_json::to_string_pretty(&diagram)?;
+        std::fs::write(output_file, &json_str)?;
+
+        Ok(ToolOutput::success(
+            json!({"file": output_file}),
+            format!("Successfully generated {}. Import this file into FossFLOW to see the visualization.", output_file)
+        ))
+    }
+}

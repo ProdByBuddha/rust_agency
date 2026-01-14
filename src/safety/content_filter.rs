@@ -152,6 +152,7 @@ impl ContentFilter {
     }
 
     /// Check output for sensitive information leakage
+    #[allow(dead_code)]
     pub fn check_output(&self, output: &str) -> ContentFilterResult {
         let mut result = ContentFilterResult::safe();
 

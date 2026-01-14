@@ -1,7 +1,7 @@
-//! Vector Memory Implementation using fastembed
+//! Vector Memory Implementation using fastembed or remote server
 //! 
 //! Provides semantic search over stored memories using vector embeddings.
-//! Uses file-based persistence with an in-memory cache for high performance.
+//! Supports local (embedded) or remote (microservice) modes.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -9,171 +9,260 @@ use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::info;
+use reqwest::Client;
+use serde_json::json;
 
 use super::{Memory, MemoryEntry};
 
-/// Vector memory backed by file storage with semantic search
-pub struct VectorMemory {
-    path: PathBuf,
-    embedder: Arc<RwLock<TextEmbedding>>,
-    /// In-memory cache of entries to avoid redundant disk I/O
-    cache: Arc<RwLock<Vec<MemoryEntry>>>,
+/// Vector memory abstraction supporting local or remote backends
+pub enum VectorMemory {
+    Local(LocalVectorMemory),
+    Remote(RemoteVectorMemory),
 }
 
 impl VectorMemory {
-    /// Create a new VectorMemory instance
+    /// Create a new VectorMemory instance based on environment config
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        info!("Initializing VectorMemory at {:?}", path);
+        let use_remote = std::env::var("AGENCY_USE_REMOTE_MEMORY").unwrap_or_else(|_| "0".to_string()) == "1";
         
+        if use_remote {
+            let host = std::env::var("AGENCY_MEMORY_HOST").unwrap_or_else(|_| "localhost".to_string());
+            let port = std::env::var("AGENCY_MEMORY_PORT").unwrap_or_else(|_| "3001".to_string());
+            let url = format!("http://{}:{}", host, port);
+            info!("Initializing RemoteVectorMemory at {}", url);
+            Ok(VectorMemory::Remote(RemoteVectorMemory::new(url)))
+        } else {
+            info!("Initializing LocalVectorMemory at {:?}", path);
+            Ok(VectorMemory::Local(LocalVectorMemory::new(path)?))
+        }
+    }
+}
+
+#[async_trait]
+impl Memory for VectorMemory {
+    async fn store(&self, entry: MemoryEntry) -> Result<String> {
+        match self {
+            Self::Local(m) => m.store(entry).await,
+            Self::Remote(m) => m.store(entry).await,
+        }
+    }
+
+    async fn search(&self, query: &str, top_k: usize, context: Option<&str>, kind: Option<crate::orchestrator::Kind>) -> Result<Vec<MemoryEntry>> {
+        match self {
+            Self::Local(m) => m.search(query, top_k, context, kind).await,
+            Self::Remote(m) => m.search(query, top_k, context, kind).await,
+        }
+    }
+
+    async fn count(&self) -> Result<usize> {
+        match self {
+            Self::Local(m) => m.count().await,
+            Self::Remote(m) => m.count().await,
+        }
+    }
+
+    async fn persist(&self) -> Result<()> {
+        match self {
+            Self::Local(m) => m.persist().await,
+            Self::Remote(m) => m.persist().await,
+        }
+    }
+
+    async fn clear_cache(&self) -> Result<()> {
+        match self {
+            Self::Local(m) => m.clear_cache().await,
+            Self::Remote(m) => m.clear_cache().await,
+        }
+    }
+
+    async fn hibernate(&self) -> Result<()> {
+        match self {
+            Self::Local(m) => m.hibernate().await,
+            Self::Remote(m) => m.hibernate().await,
+        }
+    }
+
+    async fn wake(&self) -> Result<()> {
+        match self {
+            Self::Local(m) => m.wake().await,
+            Self::Remote(m) => m.wake().await,
+        }
+    }
+}
+
+/// Vector memory backed by local file storage
+pub struct LocalVectorMemory {
+    path: PathBuf,
+    embedder: Arc<RwLock<Option<TextEmbedding>>>,
+    cache: Arc<RwLock<Vec<MemoryEntry>>>,
+}
+
+impl LocalVectorMemory {
+    pub fn new(path: PathBuf) -> Result<Self> {
         let embedder = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::AllMiniLML6V2)
-                .with_show_download_progress(true)
         ).context("Failed to initialize embedding model")?;
 
-        let mut memory = Self {
+        Ok(Self {
             path,
-            embedder: Arc::new(RwLock::new(embedder)),
+            embedder: Arc::new(RwLock::new(Some(embedder))),
             cache: Arc::new(RwLock::new(Vec::new())),
-        };
-
-        // Warm up the cache from disk
-        memory.load_to_cache_sync()?;
-        
-        Ok(memory)
+        })
     }
 
-    /// Load entries from disk into the in-memory cache
-    fn load_to_cache_sync(&mut self) -> Result<()> {
-        if !self.path.exists() {
-            return Ok(());
-        }
-        let content = std::fs::read_to_string(&self.path)?;
-        let entries: Vec<MemoryEntry> = serde_json::from_str(&content)?;
-        
-        // We use a sync block here only during initialization
-        let mut cache = self.cache.try_write()
-            .map_err(|_| anyhow::anyhow!("Failed to lock cache during init"))?;
-        *cache = entries;
-        info!("Loaded {} entries into memory cache", cache.len());
-        Ok(())
-    }
-
-    /// Generate embeddings for text and normalize them
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let embedder = self.embedder.read().await;
-        let mut embeddings = embedder.embed(texts.to_vec(), None)
-            .context("Failed to generate embeddings")?;
-        
-        // Normalize embeddings for faster dot-product similarity
-        for emb in &mut embeddings {
-            Self::normalize(emb);
+        {
+            let read_guard = self.embedder.read().await;
+            if read_guard.is_none() {
+                drop(read_guard);
+                let mut write_guard = self.embedder.write().await;
+                if write_guard.is_none() {
+                    *write_guard = Some(TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))?);
+                }
+            }
         }
-        
+        let embedder_lock = self.embedder.read().await;
+        let embedder = embedder_lock.as_ref().unwrap();
+        let mut embeddings = embedder.embed(texts.to_vec(), None)?;
+        for emb in &mut embeddings { Self::normalize(emb); }
         Ok(embeddings)
     }
 
     fn normalize(vec: &mut Vec<f32>) {
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            for x in vec {
-                *x /= norm;
-            }
-        }
+        if norm > 0.0 { for x in vec { *x /= norm; } }
     }
 
-    /// Persist the current cache to disk (async)
-    async fn persist(&self) -> Result<()> {
-        let cache = self.cache.read().await;
-        let content = serde_json::to_string_pretty(&*cache)?;
-        tokio::fs::write(&self.path, content).await?;
-        Ok(())
-    }
-
-    /// Dot product for normalized vectors (equivalent to cosine similarity)
     fn dot_product(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
     }
 }
 
 #[async_trait]
-impl Memory for VectorMemory {
-    /// Store a new memory entry
+impl Memory for LocalVectorMemory {
     async fn store(&self, mut entry: MemoryEntry) -> Result<String> {
-        let start = std::time::Instant::now();
-        // Generate embedding if missing
         if entry.embedding.is_none() {
-            debug!("Generating embedding for entry: {}", entry.id);
             let embeddings = self.embed(&[entry.content.clone()]).await?;
             entry.embedding = Some(embeddings[0].clone());
         }
-
         let mut cache = self.cache.write().await;
-        
-        // Deduplication logic: If this is a codebase file, remove the old version first
         if let Some(ref query) = entry.query {
             if entry.metadata.agent == "CodebaseIndexer" {
                 cache.retain(|e| e.query.as_ref() != Some(query));
             }
         }
-
         let id = entry.id.clone();
         cache.push(entry);
-        
-        let elapsed = start.elapsed();
-        debug!("Memory entry {} stored in-memory in {:?}", id, elapsed);
-        
         Ok(id)
     }
 
-    async fn search(&self, query: &str, top_k: usize) -> Result<Vec<MemoryEntry>> {
-        let start = std::time::Instant::now();
-        debug!("Searching memory for: {} (top {})", query, top_k);
-        
-        let query_embedding = self.embed(&[query.to_string()]).await?
-            .into_iter().next()
-            .context("No query embedding generated")?;
-        
+    async fn search(&self, query: &str, top_k: usize, context: Option<&str>, kind: Option<crate::orchestrator::Kind>) -> Result<Vec<MemoryEntry>> {
+        let query_embedding = self.embed(&[query.to_string()]).await?.into_iter().next().context("No embedding")?;
         let cache = self.cache.read().await;
-        
-        // 1. Score entries without cloning
-        let mut scored: Vec<(f32, usize)> = cache
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, e)| {
-                e.embedding.as_ref().map(|emb| {
-                    let sim = Self::dot_product(&query_embedding, emb);
-                    (sim, idx)
-                })
+        let mut scored: Vec<(f32, usize)> = cache.iter().enumerate()
+            .filter(|(_, e)| {
+                let ctx_m = context.map_or(true, |c| e.metadata.context == c);
+                let kind_m = kind.as_ref().map_or(true, |k| &e.metadata.kind == k);
+                ctx_m && kind_m
             })
+            .filter_map(|(idx, e)| e.embedding.as_ref().map(|emb| (Self::dot_product(&query_embedding, emb), idx)))
             .collect();
-        
-        // 2. Sort by score
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // 3. Clone only the top K results
-        let results: Vec<MemoryEntry> = scored.into_iter()
-            .take(top_k)
-            .map(|(score, idx)| {
-                let mut entry = cache[idx].clone();
-                entry.similarity = Some(score);
-                entry
-            })
-            .collect();
-            
-        debug!("Found {} memory entries in {:?}", results.len(), start.elapsed());
-        
-        Ok(results)
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        Ok(scored.into_iter().take(top_k).map(|(s, idx)| {
+            let mut e = cache[idx].clone();
+            e.similarity = Some(s);
+            e
+        }).collect())
+    }
+
+    async fn count(&self) -> Result<usize> { Ok(self.cache.read().await.len()) }
+    async fn persist(&self) -> Result<()> {
+        let cache = self.cache.read().await;
+        let content = serde_json::to_string_pretty(&*cache)?;
+        tokio::fs::write(&self.path, content).await?;
+        Ok(())
+    }
+    async fn clear_cache(&self) -> Result<()> { self.cache.write().await.clear(); Ok(()) }
+    async fn hibernate(&self) -> Result<()> {
+        *self.embedder.write().await = None;
+        self.cache.write().await.clear();
+        Ok(())
+    }
+    async fn wake(&self) -> Result<()> {
+        let mut emb = self.embedder.write().await;
+        if emb.is_none() {
+            *emb = Some(TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))?);
+            if self.path.exists() {
+                let content = tokio::fs::read_to_string(&self.path).await?;
+                *self.cache.write().await = serde_json::from_str(&content)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Vector memory client for remote microservice
+pub struct RemoteVectorMemory {
+    client: Client,
+    url: String,
+}
+
+impl RemoteVectorMemory {
+    pub fn new(url: String) -> Self {
+        Self { client: Client::new(), url }
+    }
+}
+
+#[async_trait]
+impl Memory for RemoteVectorMemory {
+    async fn store(&self, entry: MemoryEntry) -> Result<String> {
+        let resp = self.client.post(format!("{}/store", self.url))
+            .json(&json!({ "entry": entry }))
+            .send().await?;
+        let data: serde_json::Value = resp.json().await?;
+        Ok(data["id"].as_str().context("No ID in response")?.to_string())
+    }
+
+    async fn search(&self, query: &str, top_k: usize, context: Option<&str>, kind: Option<crate::orchestrator::Kind>) -> Result<Vec<MemoryEntry>> {
+        let resp = self.client.post(format!("{}/search", self.url))
+            .json(&json!({
+                "query": query,
+                "top_k": top_k,
+                "context": context,
+                "kind": kind
+            }))
+            .send().await?;
+        let data: serde_json::Value = resp.json().await?;
+        let entries = serde_json::from_value(data["entries"].clone())?;
+        Ok(entries)
     }
 
     async fn count(&self) -> Result<usize> {
-        let cache = self.cache.read().await;
-        Ok(cache.len())
+        let resp = self.client.get(format!("{}/count", self.url)).send().await?;
+        let data: serde_json::Value = resp.json().await?;
+        Ok(data["count"].as_u64().unwrap_or(0) as usize)
     }
 
     async fn persist(&self) -> Result<()> {
-        self.persist().await
+        self.client.post(format!("{}/persist", self.url)).send().await?;
+        Ok(())
+    }
+
+    async fn clear_cache(&self) -> Result<()> {
+        self.client.post(format!("{}/hibernate", self.url)).send().await?; // Hibernate is a stronger clear
+        Ok(())
+    }
+
+    async fn hibernate(&self) -> Result<()> {
+        self.client.post(format!("{}/hibernate", self.url)).send().await?;
+        Ok(())
+    }
+
+    async fn wake(&self) -> Result<()> {
+        self.client.post(format!("{}/wake", self.url)).send().await?;
+        Ok(())
     }
 }
 

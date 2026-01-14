@@ -23,15 +23,15 @@ impl AgencyControlTool {
 
 #[async_trait]
 impl Tool for AgencyControlTool {
-    fn name(&self) -> &str {
-        "agency_control"
+    fn name(&self) -> String {
+        "agency_control".to_string()
     }
 
-    fn description(&self) -> &str {
-        "Update the agency's own identity, name, mission, and traits. Use this to make autonomous decisions about who you are."
+    fn description(&self) -> String {
+        "Update the agency's own identity, name, mission, and traits. Use this to make autonomous decisions about who you are.".to_string()
     }
 
-    fn parameters_schema(&self) -> Value {
+    fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
@@ -39,6 +39,15 @@ impl Tool for AgencyControlTool {
                 "mission": { "type": "string", "description": "The new mission statement" },
                 "traits": { "type": "array", "items": { "type": "string" }, "description": "Updated personality traits" }
             }
+        })
+    }
+
+    fn work_scope(&self) -> Value {
+        json!({
+            "status": "highly_agential",
+            "environment": "agency configuration",
+            "safety": "high risk: alters system self-image and logic",
+            "requirements": ["manual confirmation"]
         })
     }
 
