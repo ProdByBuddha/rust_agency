@@ -18,10 +18,10 @@ futures = "0.3"
 ollama-rs = { version = "0.3", features = ["default", "stream"] }
 
 # Use LOCAL Candle for direct development and Metal optimizations
-candle-core = { path = "../candle/candle-core", features = ["metal", "accelerate"] }
-candle-transformers = { path = "../candle/candle-transformers", features = ["metal"] }
-candle-nn = { path = "../candle/candle-nn", features = ["metal"] }
-candle-onnx = { path = "../candle/candle-onnx" }
+candle-core = { path = "candle/candle-core", features = ["metal", "accelerate"] }
+candle-transformers = { path = "candle/candle-transformers", features = ["metal"] }
+candle-nn = { path = "candle/candle-nn", features = ["metal"] }
+candle-onnx = { path = "candle/candle-onnx" }
 hf-hub = "0.4.0"
 
 # Memory system - Vector DB + Embeddings
