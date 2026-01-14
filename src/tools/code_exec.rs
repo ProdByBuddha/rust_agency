@@ -2,7 +2,7 @@
 //! 
 //! Safely executes code snippets in a sandboxed environment.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::process::Stdio;
@@ -10,6 +10,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, warn};
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 /// Sandboxed code execution tool
@@ -34,15 +35,18 @@ impl CodeExecTool {
         self
     }
 
-    async fn execute_python(&self, code: &str) -> Result<(String, String, i32)> {
+    async fn execute_python(&self, code: &str) -> anyhow::Result<(String, String, i32)> {
         self.run_command("python3", &["-c", code]).await
     }
 
-    async fn execute_rust(&self, code: &str) -> Result<(String, String, i32)> {
+    async fn execute_rust(&self, code: &str) -> anyhow::Result<(String, String, i32)> {
         // For Rust, we need to create a temp file and compile
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join("agent_code.rs");
         let binary_path = temp_dir.join("agent_code");
+
+        let file_path_str = file_path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid temp file path"))?;
+        let binary_path_str = binary_path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid binary path"))?;
 
         tokio::fs::write(&file_path, code).await
             .context("Failed to write Rust code to temp file")?;
@@ -50,18 +54,19 @@ impl CodeExecTool {
         // Compile
         let (stdout, stderr, code_result) = self
             .run_command("rustc", &[
-                file_path.to_str().unwrap(),
+                file_path_str,
                 "-o",
-                binary_path.to_str().unwrap(),
+                binary_path_str,
             ])
             .await?;
 
         if code_result != 0 {
+            let _ = tokio::fs::remove_file(&file_path).await;
             return Ok((stdout, format!("Compilation failed:\n{}", stderr), code_result));
         }
 
         // Run the compiled binary
-        let result = self.run_command(binary_path.to_str().unwrap(), &[]).await;
+        let result = self.run_command(binary_path_str, &[]).await;
 
         // Clean up
         let _ = tokio::fs::remove_file(&file_path).await;
@@ -70,15 +75,15 @@ impl CodeExecTool {
         result
     }
 
-    async fn execute_javascript(&self, code: &str) -> Result<(String, String, i32)> {
+    async fn execute_javascript(&self, code: &str) -> anyhow::Result<(String, String, i32)> {
         self.run_command("node", &["-e", code]).await
     }
 
-    async fn execute_shell(&self, code: &str) -> Result<(String, String, i32)> {
+    async fn execute_shell(&self, code: &str) -> anyhow::Result<(String, String, i32)> {
         self.run_command("sh", &["-c", code]).await
     }
 
-    async fn run_command(&self, program: &str, args: &[&str]) -> Result<(String, String, i32)> {
+    async fn run_command(&self, program: &str, args: &[&str]) -> anyhow::Result<(String, String, i32)> {
         debug!("Running command: {} {:?}", program, args);
 
         let result = timeout(
@@ -131,7 +136,7 @@ impl Tool for CodeExecTool {
     }
 
     fn description(&self) -> String {
-        "Execute code in a sandboxed environment. Supports Python, JavaScript, Rust, and shell commands. \
+        "Execute code in a sandboxed environment. Supports Python, JavaScript, Rust, and shell commands.\n 
          Use this to run calculations, test code snippets, or perform automated tasks.".to_string()
     }
 
@@ -170,14 +175,30 @@ impl Tool for CodeExecTool {
         true // Always require confirmation for code execution
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn security_oracle(&self, params: &Value) -> AgentResult<bool> {
+        let code = params["code"].as_str().unwrap_or("");
+        let language = params["language"].as_str().unwrap_or("");
+
+        if language == "shell" {
+            // Check for shell operators using PAI Oracle standard
+            if let Ok(true) = pai_core::oracle::VerificationOracle::verify(
+                pai_core::oracle::OracleType::GrepMatch,
+                &format!("[;&|`$]|{}", code)
+            ) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let code = params["code"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: code"))?;
+            .ok_or_else(|| AgentError::Validation("Missing required parameter: code".to_string()))?;
         
         let language = params["language"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: language"))?;
+            .ok_or_else(|| AgentError::Validation("Missing required parameter: language".to_string()))?;
 
         debug!("Executing {} code ({} chars)", language, code.len());
 
@@ -253,7 +274,7 @@ mod tests {
         let res = tool.execute(json!({
             "language": "shell",
             "code": "echo 'hello'"
-        })).await.unwrap();
+        })).await.expect("Execution failed");
         
         assert!(res.success);
         assert!(res.summary.contains("hello"));
@@ -265,7 +286,7 @@ mod tests {
         let res = tool.execute(json!({
             "language": "cobol",
             "code": "DISPLAY 'HELLO'"
-        })).await.unwrap();
+        })).await.expect("Execution failed");
         
         assert!(!res.success);
         assert!(res.summary.contains("Unsupported language"));

@@ -1,9 +1,9 @@
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 use crate::orchestrator::profile::{AgencyProfile, ProfileManager};
 
@@ -51,7 +51,7 @@ impl Tool for AgencyControlTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let mut profile = self.current_profile.lock().await;
         
         if let Some(name) = params["name"].as_str() {
@@ -64,7 +64,8 @@ impl Tool for AgencyControlTool {
             profile.traits = traits_val.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect();
         }
 
-        self.profile_manager.save(&profile).await?;
+        self.profile_manager.save(&profile).await
+            .map_err(|e| AgentError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
         Ok(ToolOutput::success(
             json!(*profile),

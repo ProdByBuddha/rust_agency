@@ -2,12 +2,13 @@
 //! 
 //! Performs web searches using DuckDuckGo HTML API (no API key required).
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tracing::{debug, warn};
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 /// Web search tool using DuckDuckGo
@@ -25,7 +26,7 @@ impl WebSearchTool {
         }
     }
 
-    async fn search_ddg(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>> {
+    async fn search_ddg(&self, query: &str, num_results: usize) -> anyhow::Result<Vec<SearchResult>> {
         // Use DuckDuckGo HTML search (more reliable than API for simple uses)
         let url = format!(
             "https://html.duckduckgo.com/html/?q={}",
@@ -157,10 +158,10 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let query = params["query"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
+            .ok_or_else(|| AgentError::Validation("Missing required parameter: query".to_string()))?;
         
         let num_results = params["num_results"]
             .as_u64()

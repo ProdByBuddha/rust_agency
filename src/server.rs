@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use anyhow::Result;
-use chrono;
 use std::convert::Infallible;
 use futures_util::{StreamExt, SinkExt};
 use axum::http::StatusCode;
@@ -164,8 +163,7 @@ pub async fn run_server(state: AppState) -> Result<()> {
     let addr = "0.0.0.0:8002";
     println!("🚀 SOTA Backend Ready: http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .await; // Removed shutdown signal to allow main thread to control shutdown if needed, or we can re-add it.
+    let _ = axum::serve(listener, app).await;
 
     Ok(())
 }

@@ -2,7 +2,7 @@
 //! 
 //! Allows for loading and executing custom scripts as first-class tools.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,8 +11,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-use tracing::debug;
+use tracing::{debug, warn};
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput, ToolRegistry};
 
 /// Metadata for a dynamic tool
@@ -36,13 +37,13 @@ impl DynamicTool {
         Self { metadata, base_path }
     }
 
-    pub fn from_file(path: &Path) -> Result<Self> {
+    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
-            .context(format!("Failed to read tool metadata at {:?}", path))?;
+            .with_context(|| format!("Failed to read tool metadata at {:?}", path))?;
         let metadata: DynamicToolMetadata = serde_json::from_str(&content)
-            .context(format!("Failed to parse tool metadata at {:?}", path))?;
+            .with_context(|| format!("Failed to parse tool metadata at {:?}", path))?;
         
-        let base_path = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let base_path = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
         Ok(Self { metadata, base_path })
     }
 }
@@ -68,7 +69,7 @@ impl Tool for DynamicTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let script_abs_path = self.base_path.join(&self.metadata.script_path);
         
         if !script_abs_path.exists() {
@@ -77,24 +78,29 @@ impl Tool for DynamicTool {
 
         let params_json = serde_json::to_string(&params)?;
         
+        let script_str = script_abs_path.to_str().ok_or_else(|| AgentError::Validation("Invalid script path".to_string()))?;
+
         let (cmd, args) = match self.metadata.language.as_str() {
-            "python" => ("python3".to_string(), vec![script_abs_path.to_str().unwrap().to_string(), params_json]),
-            "node" => ("node".to_string(), vec![script_abs_path.to_str().unwrap().to_string(), params_json]),
-            "shell" => ("sh".to_string(), vec![script_abs_path.to_str().unwrap().to_string(), params_json]),
+            "python" => ("python3".to_string(), vec![script_str.to_string(), params_json]),
+            "node" => ("node".to_string(), vec![script_str.to_string(), params_json]),
+            "shell" => ("sh".to_string(), vec![script_str.to_string(), params_json]),
             "rust" => {
                 // For Rust, we compile to a binary first
                 let binary_path = script_abs_path.with_extension("");
+                let binary_str = binary_path.to_str().ok_or_else(|| AgentError::Validation("Invalid binary path".to_string()))?;
+                
                 let compile_status = Command::new("rustc")
-                    .arg(script_abs_path.to_str().unwrap())
+                    .arg(script_str)
                     .arg("-o")
-                    .arg(binary_path.to_str().unwrap())
+                    .arg(binary_str)
                     .status()
-                    .await?;
+                    .await
+                    .map_err(|e| AgentError::Tool(format!("Failed to spawn rustc: {}", e)))?;
 
                 if !compile_status.success() {
                     return Ok(ToolOutput::failure("Failed to compile dynamic Rust tool"));
                 }
-                (binary_path.to_str().unwrap().to_string(), vec![params_json])
+                (binary_str.to_string(), vec![params_json])
             },
             _ => return Ok(ToolOutput::failure(format!("Unsupported language: {}", self.metadata.language))),
         };
@@ -131,8 +137,8 @@ impl Tool for DynamicTool {
                     })
                 }
             }
-            Ok(Err(e)) => Err(anyhow::anyhow!("Failed to execute dynamic tool: {}", e)),
-            Err(_) => Err(anyhow::anyhow!("Dynamic tool execution timed out")),
+            Ok(Err(e)) => Err(AgentError::Tool(format!("Failed to execute dynamic tool: {}", e))),
+            Err(_) => Err(AgentError::Execution("Dynamic tool execution timed out".to_string())),
         }
     }
 }
@@ -159,9 +165,9 @@ impl Tool for ForgeTool {
     }
 
     fn description(&self) -> String {
-        "Forge a new specialized tool by providing metadata and a script. \
-         The new tool will be permanently available to the agency and CAN BE USED IMMEDIATELY in the next step. \
-         BY DEFAULT, tools should be forged in 'rust' unless specifically requested otherwise by the human or necessitated by complex logic. \
+        "Forge a new specialized tool by providing metadata and a script.\n
+         The new tool will be permanently available to the agency and CAN BE USED IMMEDIATELY in the next step.\n 
+         BY DEFAULT, tools should be forged in 'rust' unless specifically requested otherwise by the human or necessitated by complex logic.\n 
          Use this when you need a specialized functionality that doesn't exist yet (e.g. specialized file parsing, data transformation, or API interaction).".to_string()
     }
 
@@ -188,19 +194,23 @@ impl Tool for ForgeTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
-        let name = params["name"].as_str().ok_or_else(|| anyhow::anyhow!("Missing name"))?;
-        let description = params["description"].as_str().ok_or_else(|| anyhow::anyhow!("Missing description"))?;
-        let language = params["language"].as_str().ok_or_else(|| anyhow::anyhow!("Missing language"))?;
-        let code = params["code"].as_str().ok_or_else(|| anyhow::anyhow!("Missing code"))?;
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
+        let name = params["name"].as_str().ok_or_else(|| AgentError::Validation("Missing name".to_string()))?;
+        let description = params["description"].as_str().ok_or_else(|| AgentError::Validation("Missing description".to_string()))?;
+        let language = params["language"].as_str().ok_or_else(|| AgentError::Validation("Missing language".to_string()))?;
+        let code = params["code"].as_str().ok_or_else(|| AgentError::Validation("Missing code".to_string()))?;
         
-        let ext = match language {
-            "python" => "py",
-            "node" => "js",
-            "shell" => "sh",
-            "rust" => "rs",
-            _ => "script",
+        let (ext, is_safe) = match language {
+            "python" => ("py", true),
+            "node" => ("js", true),
+            "shell" => ("sh", false), // Shell is higher risk
+            "rust" => ("rs", true),
+            _ => ("script", false),
         };
+
+        if !is_safe {
+            warn!("Forging high-risk tool: {} in {}", name, language);
+        }
 
         let script_filename = format!("{}.{}", name, ext);
         let metadata_filename = format!("{}.json", name);
@@ -250,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn test_forge_tool_execute() {
         let registry = Arc::new(ToolRegistry::new());
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir");
         let tool = ForgeTool::new(temp_dir.path(), registry.clone());
         
         let params = json!({
@@ -261,7 +271,7 @@ mod tests {
             "code": "print('hello')"
         });
         
-        let res = tool.execute(params).await.unwrap();
+        let res = tool.execute(params).await.expect("Tool execution failed");
         assert!(res.success);
         
         // Check if files were created

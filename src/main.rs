@@ -10,13 +10,13 @@
 
 use rust_agency::tools::McpServer;
 use anyhow::Result;
-use ollama_rs::Ollama;
 use std::sync::Arc;
 use tracing::info;
 use tokio::sync::{Mutex, broadcast};
 
 use rust_agency::memory::{Memory, VectorMemory, MemoryManager, EpisodicMemory};
-use rust_agency::orchestrator::{Supervisor, SessionManager, Speaker, profile::ProfileManager};
+use rust_agency::orchestrator::{Supervisor, SessionManager, profile::ProfileManager};
+use rust_agency::agent::Speaker;
 use rust_agency::tools::{
     Tool, ToolRegistry, WebSearchTool, CodeExecTool, MemoryQueryTool, 
     KnowledgeGraphTool, ArtifactTool, SandboxTool, CodebaseTool, 
@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
     // LAUNCH CLI (Foreground)
     // ──────────────────────────────────────────────────────────────────────────
     // Launch the professional FPF-aligned CLI with SHARED speaker and supervisor
-    let mut cli = rust_agency::orchestrator::cli::AgencyCLI::new(shared_supervisor, shared_speaker);
+    let cli = rust_agency::orchestrator::cli::AgencyCLI::new(shared_supervisor, shared_speaker);
     cli.run().await?;
 
     Ok(())

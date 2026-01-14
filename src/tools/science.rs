@@ -3,13 +3,13 @@
 //! Provides tools to browse and query the hierarchical scientific encyclopedia
 //! hosted at https://github.com/deepmodeling/sciencepedia
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::debug;
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 #[derive(Debug, Deserialize)]
@@ -41,7 +41,7 @@ impl ScienceTool {
         }
     }
 
-    async fn fetch_github_dir(&self, path: &str) -> Result<Vec<GithubContent>> {
+    async fn fetch_github_dir(&self, path: &str) -> AgentResult<Vec<GithubContent>> {
         let url = if path.is_empty() {
             self.api_base.clone()
         } else {
@@ -49,26 +49,29 @@ impl ScienceTool {
         };
 
         debug!("Fetching GitHub directory: {}", url);
-        let response = self.client.get(&url).send().await?;
+        let response = self.client.get(&url).send().await
+            .map_err(|e| AgentError::Tool(format!("GitHub request failed: {}", e)))?;
         
         if !response.status().is_success() {
-            anyhow::bail!("GitHub API error: {}", response.status());
+            return Err(AgentError::Tool(format!("GitHub API error: {}", response.status())));
         }
 
-        let contents: Vec<GithubContent> = response.json().await?;
+        let contents: Vec<GithubContent> = response.json().await
+            .map_err(|e| AgentError::Tool(format!("Failed to parse GitHub response: {}", e)))?;
         Ok(contents)
     }
 
-    async fn fetch_raw_content(&self, path: &str) -> Result<String> {
+    async fn fetch_raw_content(&self, path: &str) -> AgentResult<String> {
         let url = format!("{}/{}", self.raw_base, path);
         debug!("Fetching raw content: {}", url);
         
-        let response = self.client.get(&url).send().await?;
+        let response = self.client.get(&url).send().await
+            .map_err(|e| AgentError::Tool(format!("GitHub request failed: {}", e)))?;
         if !response.status().is_success() {
-            anyhow::bail!("Failed to fetch raw content: {}", response.status());
+            return Err(AgentError::Tool(format!("Failed to fetch raw content: {}", response.status())));
         }
 
-        Ok(response.text().await?)
+        Ok(response.text().await.map_err(|e| AgentError::Tool(e.to_string()))?)
     }
 }
 
@@ -116,7 +119,7 @@ impl Tool for ScienceTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("list_categories");
 
         match action {
@@ -166,7 +169,7 @@ impl Tool for ScienceTool {
                 }
             },
             "read_article" => {
-                let rel_path = params["path"].as_str().context("Missing path")?;
+                let rel_path = params["path"].as_str().ok_or_else(|| AgentError::Validation("Missing path".to_string()))?;
                 
                 // Try MainContent.md first
                 let main_path = format!("{}/MainContent.md", rel_path);

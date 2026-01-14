@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::info;
 use rust_agency::memory::{VectorMemory, Memory, MemoryEntry};
 use rust_agency::memory::entry::MemorySource;
 use rust_agency::orchestrator::Kind;

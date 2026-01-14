@@ -11,7 +11,7 @@ use pai_core::skills::SkillRegistry;
 use pai_core::fabric::FabricRegistry;
 use pai_core::classifier::EffortClassifier;
 use pai_core::learning::LearningEngine;
-use pai_core::orchestration::{DynamicCapabilityLoader, CapabilityOrchestrator};
+use pai_core::orchestration::DynamicCapabilityLoader;
 use pai_core::manifest::ManifestEngine;
 use pai_core::upgrades::UpgradeMonitor;
 use pai_core::privacy::PrivacyGuard;

@@ -39,6 +39,7 @@ pub use dynamic::{DynamicTool, ForgeTool};
 pub use mcp::{McpServer, McpProxyTool};
 pub use skills::{MarkdownSkill, SkillLoader};
 
+use crate::agent::AgentResult;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -125,9 +126,15 @@ pub trait Tool: Send + Sync {
             "notes": "No explicit hardware or data constraints declared."
         })
     }
+
+    /// Perform a security check before execution (FPF SOTA Protection)
+    async fn security_oracle(&self, _params: &Value) -> AgentResult<bool> {
+        // Default: Passive (Assume safe or handled by validator)
+        Ok(true)
+    }
     
     /// Execute the tool with the given parameters
-    async fn execute(&self, params: Value) -> Result<ToolOutput>;
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput>;
 
     /// Whether this tool requires explicit human confirmation
     fn requires_confirmation(&self) -> bool {
@@ -258,7 +265,7 @@ impl ToolRegistry {
     }
 
     /// Execute a tool call with caching
-    pub async fn execute(&self, call: &ToolCall) -> Result<ToolOutput> {
+    pub async fn execute(&self, call: &ToolCall) -> AgentResult<ToolOutput> {
         let cache_key = format!("{}:{}", call.name, serde_json::to_string(&call.parameters)?);
         
         // Check cache
@@ -276,7 +283,13 @@ impl ToolRegistry {
         };
 
         let result = match tool {
-            Some(tool) => tool.execute(call.parameters.clone()).await?,
+            Some(tool) => {
+                // SOTA Security Check
+                if !tool.security_oracle(&call.parameters).await? {
+                    return Ok(ToolOutput::failure(format!("Security Oracle blocked execution of tool '{}'", call.name)));
+                }
+                tool.execute(call.parameters.clone()).await?
+            },
             None => ToolOutput::failure(format!("Unknown tool: {}", call.name)),
         };
 
@@ -290,7 +303,7 @@ impl ToolRegistry {
     }
 
     /// Execute multiple tool calls in parallel
-    pub async fn execute_parallel(&self, calls: &[ToolCall]) -> Vec<Result<ToolOutput>> {
+    pub async fn execute_parallel(&self, calls: &[ToolCall]) -> Vec<AgentResult<ToolOutput>> {
         let mut futures = Vec::new();
         for call in calls {
             futures.push(self.execute(call));
@@ -363,7 +376,7 @@ mod tests {
         fn name(&self) -> String { "mock_tool".to_string() }
         fn description(&self) -> String { "A mock tool for testing".to_string() }
         fn parameters(&self) -> Value { json!({"type": "object"}) }
-        async fn execute(&self, params: Value) -> Result<ToolOutput> {
+        async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
             Ok(ToolOutput::success(params, "Mock execution successful"))
         }
     }

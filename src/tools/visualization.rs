@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use crate::tools::{Tool, ToolOutput};
-use anyhow::Result;
+use crate::agent::AgentResult;
 
 #[derive(Default)]
 pub struct VisualizationTool;
@@ -44,7 +44,7 @@ impl Tool for VisualizationTool {
         })
     }
 
-    async fn execute(&self, parameters: Value) -> Result<ToolOutput> {
+    async fn execute(&self, parameters: Value) -> AgentResult<ToolOutput> {
         let output_file = parameters["output_file"].as_str().unwrap_or("agency_isometric.json");
 
         let diagram = json!({

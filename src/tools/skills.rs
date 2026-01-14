@@ -4,13 +4,14 @@
 //! in a skills/ directory. Each file contains YAML frontmatter
 //! with metadata and a body with instructions.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::agent::AgentResult;
 use super::{Tool, ToolOutput};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -28,7 +29,7 @@ pub struct MarkdownSkill {
 }
 
 impl MarkdownSkill {
-    pub async fn load_from_file(path: &Path) -> Result<Self> {
+    pub async fn load_from_file(path: &Path) -> anyhow::Result<Self> {
         let content = tokio::fs::read_to_string(path).await?;
         
         // Extract frontmatter
@@ -51,7 +52,7 @@ impl MarkdownSkill {
     }
 
     /// Promotes the skill from custom/experimental to standard
-    pub async fn promote(&self, standard_dir: &Path) -> Result<()> {
+    pub async fn promote(&self, standard_dir: &Path) -> anyhow::Result<()> {
         if !standard_dir.exists() {
             tokio::fs::create_dir_all(standard_dir).await?;
         }
@@ -88,7 +89,7 @@ impl Tool for MarkdownSkill {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let input = params["input"].as_str().unwrap_or("");
         info!("Executing skill {}: input={}", self.name(), input);
         
@@ -103,7 +104,7 @@ impl Tool for MarkdownSkill {
 pub struct SkillLoader;
 
 impl SkillLoader {
-    pub async fn discover_skills(dir_path: impl AsRef<Path>) -> Result<Vec<MarkdownSkill>> {
+    pub async fn discover_skills(dir_path: impl AsRef<Path>) -> anyhow::Result<Vec<MarkdownSkill>> {
         let path = dir_path.as_ref();
         if !path.exists() {
             return Ok(Vec::new());

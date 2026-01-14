@@ -2,12 +2,12 @@
 //! 
 //! Allows agents to search their own memory.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 use crate::memory::Memory;
 
@@ -61,10 +61,10 @@ impl Tool for MemoryQueryTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let query = params["query"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: query"))?;
+            .ok_or_else(|| AgentError::Validation("Missing required parameter: query".to_string()))?;
         
         let top_k = params["top_k"]
             .as_u64()
@@ -151,15 +151,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_query_tool_execute() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir");
         let path = temp_dir.path().join("memory.json");
-        let memory = Arc::new(VectorMemory::new(path).unwrap());
+        let memory = Arc::new(VectorMemory::new(path).expect("Failed to create memory"));
         
         // Seed some memory
-        memory.store(MemoryEntry::new("Rust is a systems programming language", "test", MemorySource::User)).await.unwrap();
+        memory.store(MemoryEntry::new("Rust is a systems programming language", "test", MemorySource::User)).await.expect("Failed to store memory");
         
         let tool = MemoryQueryTool::new(memory);
-        let res = tool.execute(json!({"query": "what is rust?"})).await.unwrap();
+        let res = tool.execute(json!({"query": "what is rust?"})).await.expect("Tool execution failed");
         
         assert!(res.success);
         assert!(res.summary.contains("Found 1 relevant memories"));
@@ -168,12 +168,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_query_tool_empty() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir");
         let path = temp_dir.path().join("memory.json");
-        let memory = Arc::new(VectorMemory::new(path).unwrap());
+        let memory = Arc::new(VectorMemory::new(path).expect("Failed to create memory"));
         
         let tool = MemoryQueryTool::new(memory);
-        let res = tool.execute(json!({"query": "anything?"})).await.unwrap();
+        let res = tool.execute(json!({"query": "anything?"})).await.expect("Tool execution failed");
         
         assert!(res.success);
         assert!(res.summary.contains("No relevant memories found"));

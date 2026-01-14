@@ -2,7 +2,6 @@
 // 
 // Allows listing, adding, and selecting models in the agency registry.
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,6 +9,7 @@ use std::fs::File;
 use std::io::Write;
 use schemars::JsonSchema;
 
+use crate::agent::{AgentResult, AgentError};
 use crate::tools::{Tool, ToolOutput};
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug)]
@@ -46,16 +46,16 @@ struct Registry {
 pub struct ModelManager;
 
 impl ModelManager {
-    fn load_registry(&self) -> Result<Registry> {
-        let file = File::open("agency_models.json").context("Failed to open agency_models.json")?;
-        let registry: Registry = serde_json::from_reader(file)?;
+    fn load_registry(&self) -> AgentResult<Registry> {
+        let file = File::open("agency_models.json").map_err(|e| AgentError::Io(e))?;
+        let registry: Registry = serde_json::from_reader(file).map_err(|e| AgentError::Serde(e))?;
         Ok(registry)
     }
 
-    fn save_registry(&self, registry: &Registry) -> Result<()> {
-        let json = serde_json::to_string_pretty(registry)?;
-        let mut file = File::create("agency_models.json")?;
-        file.write_all(json.as_bytes())?;
+    fn save_registry(&self, registry: &Registry) -> AgentResult<()> {
+        let json = serde_json::to_string_pretty(registry).map_err(|e| AgentError::Serde(e))?;
+        let mut file = File::create("agency_models.json").map_err(|e| AgentError::Io(e))?;
+        file.write_all(json.as_bytes()).map_err(|e| AgentError::Io(e))?;
         Ok(())
     }
 }
@@ -99,8 +99,8 @@ impl Tool for ModelManager {
         })
     }
 
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolOutput> {
-        let p: ModelManagerParams = serde_json::from_value(params)?;
+    async fn execute(&self, params: serde_json::Value) -> AgentResult<ToolOutput> {
+        let p: ModelManagerParams = serde_json::from_value(params).map_err(|e| AgentError::Serde(e))?;
         let mut registry = self.load_registry()?;
 
         match p.action.as_str() {
@@ -118,11 +118,11 @@ impl Tool for ModelManager {
                         defaults.join(", ")
                     ));
                 }
-                Ok(ToolOutput::success(serde_json::to_value(&registry.models)?, table))
+                Ok(ToolOutput::success(serde_json::to_value(&registry.models).map_err(|e| AgentError::Serde(e))?, table))
             },
             "select" => {
-                let name = p.name.context("Model name required for 'select'")?;
-                let class = p.class.context("Scale class required for 'select'")?;
+                let name = p.name.ok_or_else(|| AgentError::Validation("Model name required for 'select'".to_string()))?;
+                let class = p.class.ok_or_else(|| AgentError::Validation("Scale class required for 'select'".to_string()))?;
                 
                 if !registry.models.iter().any(|m| m.name == name) {
                     return Ok(ToolOutput::failure(format!("Model '{}' not found in registry.", name)));
@@ -136,8 +136,8 @@ impl Tool for ModelManager {
                 ))
             },
             "add" => {
-                let name = p.name.context("Model name required for 'add'")?;
-                let repo = p.repo.context("Repo ID required for 'add'")?;
+                let name = p.name.ok_or_else(|| AgentError::Validation("Model name required for 'add'".to_string()))?;
+                let repo = p.repo.ok_or_else(|| AgentError::Validation("Repo ID required for 'add'".to_string()))?;
                 
                 let is_quantized = p.quant_file.is_some();
                 let config = ModelConfig {
@@ -153,15 +153,15 @@ impl Tool for ModelManager {
                 registry.models.push(config.clone());
                 self.save_registry(&registry)?;
                 Ok(ToolOutput::success(
-                    serde_json::to_value(config)?,
+                    serde_json::to_value(config).map_err(|e| AgentError::Serde(e))?,
                     format!("Added model '{}' to the registry.", name)
                 ))
             },
             "pull" => {
-                let name = p.name.context("Model name required for 'pull'")?;
+                let name = p.name.ok_or_else(|| AgentError::Validation("Model name required for 'pull'".to_string()))?;
                 let config = registry.models.iter().find(|m| m.name == name)
                     .cloned()
-                    .context(format!("Model '{}' not found in registry. Add it first.", name))?;
+                    .ok_or_else(|| AgentError::Validation(format!("Model '{}' not found in registry. Add it first.", name)))?;
 
                 println!("⏳ Pulling model weights for '{}'...", name);
                 
@@ -171,7 +171,7 @@ impl Tool for ModelManager {
                 let is_quantized = config.is_quantized;
                 let quant_file = config.quant_file.clone();
 
-                tokio::task::spawn_blocking(move || -> Result<()> {
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     use hf_hub::{api::sync::ApiBuilder, Repo};
                     let mut api_builder = ApiBuilder::new().with_progress(true);
                     if let Some(token) = hf_token {
@@ -191,7 +191,8 @@ impl Tool for ModelManager {
                         }
                     }
                     Ok(())
-                }).await??;
+                }).await.map_err(|e| AgentError::Execution(e.to_string()))?
+                .map_err(|e| AgentError::Tool(e.to_string()))?;
 
                 Ok(ToolOutput::success(
                     json!({"model": name, "status": "pulled"}),

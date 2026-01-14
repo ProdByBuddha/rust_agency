@@ -1,10 +1,9 @@
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::agent::Speaker;
+use crate::agent::{Speaker, AgentResult, AgentError};
 use crate::tools::{Tool, ToolOutput};
 
 /// Tool for generating speech using the native Rust Speaker
@@ -43,12 +42,13 @@ impl Tool for SpeakerRsTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
-        let text = params["text"].as_str().ok_or_else(|| anyhow::anyhow!("Missing text parameter"))?;
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
+        let text = params["text"].as_str().ok_or_else(|| AgentError::Validation("Missing text parameter".to_string()))?;
         
         let mut speaker = self.speaker.lock().await;
         // High-level say() handles internal streaming and async pipeline
-        speaker.say(text).await?;
+        speaker.say(text).await
+            .map_err(|e| AgentError::Tool(format!("Speech synthesis failed: {}", e)))?;
 
         Ok(ToolOutput::success(
             json!({ "status": "completed" }),

@@ -1,14 +1,14 @@
 //! System Monitor Tool
-//! 
+//!
 //! Provides real-time information about hardware resources, processes, and peripherals.
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::info;
 use sysinfo::System;
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 use crate::memory::MemoryManager;
 
@@ -31,22 +31,26 @@ impl SystemTool {
         // List USB devices using nusb
         if let Ok(devices) = nusb::list_devices() {
             for device in devices {
-                peripherals["usb"].as_array_mut().unwrap().push(json!({
-                    "vendor_id": format!("0x{:04x}", device.vendor_id()),
-                    "product_id": format!("0x{:04x}", device.product_id()),
-                    "manufacturer": device.manufacturer_string(),
-                    "product": device.product_string(),
-                }));
+                if let Some(usb_arr) = peripherals["usb"].as_array_mut() {
+                    usb_arr.push(json!({
+                        "vendor_id": format!("0x{:04x}", device.vendor_id()),
+                        "product_id": format!("0x{:04x}", device.product_id()),
+                        "manufacturer": device.manufacturer_string(),
+                        "product": device.product_string(),
+                    }));
+                }
             }
         }
 
         // List Serial ports using serialport
         if let Ok(ports) = serialport::available_ports() {
             for port in ports {
-                peripherals["serial"].as_array_mut().unwrap().push(json!({
-                    "port_name": port.port_name,
-                    "type": format!("{:?}", port.port_type),
-                }));
+                if let Some(serial_arr) = peripherals["serial"].as_array_mut() {
+                    serial_arr.push(json!({
+                        "port_name": port.port_name,
+                        "type": format!("{:?}", port.port_type),
+                    }));
+                }
             }
         }
 
@@ -59,7 +63,7 @@ impl SystemTool {
         
         let mut processes: Vec<_> = sys.processes().values().collect();
         // Sort by CPU usage descending
-        processes.sort_by(|a, b| b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap());
+        processes.sort_by(|a, b| b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap_or(std::cmp::Ordering::Equal));
         
         let top_processes: Vec<_> = processes.iter().take(10).map(|p| {
             json!({
@@ -107,7 +111,7 @@ impl Tool for SystemTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("status");
         info!("SystemTool: Action = {}", action);
 
@@ -131,16 +135,16 @@ impl Tool for SystemTool {
             },
             "peripherals" => {
                 let devices = self.get_peripherals();
-                let usb_count = devices["usb"].as_array().unwrap().len();
-                let serial_count = devices["serial"].as_array().unwrap().len();
+                let usb_count = devices["usb"].as_array().map(|a| a.len()).unwrap_or(0);
+                let serial_count = devices["serial"].as_array().map(|a| a.len()).unwrap_or(0);
                 let summary = format!("Detected {} USB devices and {} Serial ports.", usb_count, serial_count);
                 Ok(ToolOutput::success(devices, summary))
             },
             "self_awareness" => {
                 let mut sys = System::new_all();
                 sys.refresh_all();
-                let pid = sysinfo::get_current_pid().map_err(|e| anyhow::anyhow!(e))?;
-                let process = sys.process(pid).context("Failed to find self process")?;
+                let pid = sysinfo::get_current_pid().map_err(|e| AgentError::Execution(e.to_string()))?;
+                let process = sys.process(pid).ok_or_else(|| AgentError::Execution("Failed to find self process".to_string()))?;
                 
                 let data = json!({
                     "pid": pid.to_string(),
@@ -165,13 +169,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_system_tool_execute() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir");
         let path = temp_dir.path().join("test_memory.json");
-        let memory = Arc::new(VectorMemory::new(path).unwrap());
+        let memory = Arc::new(VectorMemory::new(path).expect("Failed to create memory"));
         let manager = Arc::new(MemoryManager::new(memory));
         let tool = SystemTool::new(manager);
         
-        let res = tool.execute(json!({})).await.unwrap();
+        let res = tool.execute(json!({})).await.expect("Tool execution failed");
         assert!(res.success);
         assert!(res.summary.contains("Hardware Status"));
         assert!(res.data.is_object());

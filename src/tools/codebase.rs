@@ -3,12 +3,12 @@
 //! Allows agents to search and read the project's own source code.
 //! This helps agents understand their own capabilities and tool definitions.
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 /// Tool for exploring the agency's own codebase
@@ -88,7 +88,7 @@ impl Tool for CodebaseTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("list_files");
 
         match action {
@@ -101,7 +101,7 @@ impl Tool for CodebaseTool {
                         Ok(e) => e,
                         Err(e) => return Ok(ToolOutput::failure(format!("Failed to read directory: {}", e))),
                     };
-                    while let Some(entry) = entries.next_entry().await? {
+                    while let Some(entry) = entries.next_entry().await.map_err(|e| AgentError::Io(e))? {
                         let path = entry.path();
                         if path.is_dir() {
                             let path_str = path.to_string_lossy();
@@ -122,7 +122,7 @@ impl Tool for CodebaseTool {
                 Ok(ToolOutput::success(json!({ "files": files }), tree_summary))
             },
             "read_file" => {
-                let rel_path = params["path"].as_str().context("Missing path")?;
+                let rel_path = params["path"].as_str().ok_or_else(|| AgentError::Validation("Missing path".to_string()))?;
                 
                 // Construct the path carefully
                 let path = self.src_dir.join(rel_path);
@@ -161,49 +161,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_codebase_list_files() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("Failed to create temp dir");
         let src_path = dir.path().join("src");
-        fs::create_dir(&src_path).await.unwrap();
+        fs::create_dir(&src_path).await.expect("Failed to create src dir");
         
         let file_path = src_path.join("lib.rs");
-        let mut file = File::create(file_path).unwrap();
-        writeln!(file, "fn main() {{}}").unwrap();
+        let mut file = File::create(file_path).expect("Failed to create lib.rs");
+        writeln!(file, "fn main() {{}}").expect("Failed to write to lib.rs");
         
         // We need real absolute paths for canonicalize to work in tests
         let tool = CodebaseTool::new(src_path);
-        let res = tool.execute(json!({"action": "list_files"})).await.unwrap();
+        let res = tool.execute(json!({"action": "list_files"})).await.expect("Tool execution failed");
         
         assert!(res.success);
-        let files = res.data["files"].as_array().unwrap();
-        assert!(files.iter().any(|f| f.as_str().unwrap().contains("lib.rs")));
+        let files = res.data["files"].as_array().expect("No files in data");
+        assert!(files.iter().any(|f| f.as_str().expect("Not a string").contains("lib.rs")));
     }
 
     #[tokio::test]
     async fn test_codebase_read_file() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("Failed to create temp dir");
         let src_path = dir.path().join("src");
-        fs::create_dir(&src_path).await.unwrap();
+        fs::create_dir(&src_path).await.expect("Failed to create src dir");
         
         let file_path = src_path.join("lib.rs");
-        let mut file = File::create(&file_path).unwrap();
+        let mut file = File::create(&file_path).expect("Failed to create lib.rs");
         let content = "pub fn hello() {}";
-        writeln!(file, "{}", content).unwrap();
+        writeln!(file, "{}", content).expect("Failed to write to lib.rs");
         
         let tool = CodebaseTool::new(&src_path);
         let res = tool.execute(json!({
             "action": "read_file",
             "path": "lib.rs"
-        })).await.unwrap();
+        })).await.expect("Tool execution failed");
         
         assert!(res.success);
-        assert!(res.data["content"].as_str().unwrap().contains(content));
+        assert!(res.data["content"].as_str().expect("No content in data").contains(content));
     }
 
     #[tokio::test]
     async fn test_codebase_safety() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("Failed to create temp dir");
         let src_path = dir.path().join("src");
-        fs::create_dir(&src_path).await.unwrap();
+        fs::create_dir(&src_path).await.expect("Failed to create src dir");
         
         let tool = CodebaseTool::new(&src_path);
         
@@ -211,7 +211,7 @@ mod tests {
         let res = tool.execute(json!({
             "action": "read_file",
             "path": "../secret.txt"
-        })).await.unwrap();
+        })).await.expect("Tool execution failed");
         
         assert!(!res.success);
         assert!(res.summary.contains("Access denied"));

@@ -3,7 +3,6 @@
 //! Provides a unified interface for executing code and managing files
 //! across different backends (Local Docker, Daytona, E2B).
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
@@ -17,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 /// Backend providers for the sandbox
@@ -63,10 +63,11 @@ impl SandboxTool {
     }
 
     #[cfg(target_os = "macos")]
-    async fn execute_macos_native(&self, code: &str, language: &str) -> Result<ToolOutput> {
+    async fn execute_macos_native(&self, code: &str, language: &str) -> AgentResult<ToolOutput> {
         info!("Initializing MacOS Native sandbox (Seatbelt) for {}...", language);
         
-        let temp_dir = tempfile::tempdir()?;
+        let temp_dir = tempfile::tempdir()
+            .map_err(|e| AgentError::Io(e))?;
         let script_path = temp_dir.path().join(match language {
             "python" => "script.py",
             "javascript" => "script.js",
@@ -74,13 +75,15 @@ impl SandboxTool {
             _ => "script.sh",
         });
         
-        std::fs::write(&script_path, code)?;
+        std::fs::write(&script_path, code)
+            .map_err(|e| AgentError::Io(e))?;
 
         // Build the policy
         let mut policy = String::from(MACOS_SEATBELT_BASE_POLICY);
         
         // Allow reading and writing to the temp directory
-        let canonical_temp = temp_dir.path().canonicalize()?;
+        let canonical_temp = temp_dir.path().canonicalize()
+            .map_err(|e| AgentError::Io(e))?;
         policy.push_str(&format!(
             "(allow file-read* file-write* (subpath \"{}\"))\n",
             canonical_temp.to_string_lossy()
@@ -112,7 +115,8 @@ impl SandboxTool {
         let output = tokio::process::Command::new("/usr/bin/sandbox-exec")
             .args(&cmd_args)
             .output()
-            .await?;
+            .await
+            .map_err(|e| AgentError::Tool(format!("Failed to execute sandbox-exec: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -128,11 +132,11 @@ impl SandboxTool {
         }
     }
 
-    async fn execute_local_docker(&self, code: &str, language: &str) -> Result<ToolOutput> {
+    async fn execute_local_docker(&self, code: &str, language: &str) -> AgentResult<ToolOutput> {
         info!("Initializing local Docker sandbox for {}...", language);
         
         let docker = Docker::connect_with_local_defaults()
-            .context("Failed to connect to Docker Desktop. Ensure it is running.")?;
+            .map_err(|e| AgentError::Tool(format!("Failed to connect to Docker Desktop: {}", e)))?;
 
         let image = match language {
             "python" => "python:3.11-slim",
@@ -173,11 +177,11 @@ impl SandboxTool {
                 ..Default::default()
             }),
             config
-        ).await.context("Failed to create Docker container")?;
+        ).await.map_err(|e| AgentError::Tool(format!("Failed to create Docker container: {}", e)))?;
 
         // 2. Start container
         docker.start_container(&container_name, None::<StartContainerOptions>)
-            .await.context("Failed to start Docker container")?;
+            .await.map_err(|e| AgentError::Tool(format!("Failed to start Docker container: {}", e)))?;
 
         // 3. Prepare execution - We use a file-based approach to avoid shell escaping issues
         let filename = match language {
@@ -198,8 +202,8 @@ EOF", filename, escaped_code);
             attach_stderr: Some(true),
             cmd: Some(vec!["sh", "-c", &write_cmd]),
             ..Default::default()
-        }).await?.id;
-        docker.start_exec(&exec_write, None).await?;
+        }).await.map_err(|e| AgentError::Tool(format!("Failed to create exec for write: {}", e)))?.id;
+        docker.start_exec(&exec_write, None).await.map_err(|e| AgentError::Tool(format!("Failed to start exec for write: {}", e)))?;
 
         // 4. Run the code
         let run_cmd = match language {
@@ -214,12 +218,12 @@ EOF", filename, escaped_code);
             attach_stderr: Some(true),
             cmd: Some(run_cmd),
             ..Default::default()
-        }).await?.id;
+        }).await.map_err(|e| AgentError::Tool(format!("Failed to create exec for run: {}", e)))?.id;
 
         let mut stdout = String::new();
         let mut stderr = String::new();
 
-        if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec_run, None).await? {
+        if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec_run, None).await.map_err(|e| AgentError::Tool(format!("Failed to start exec for run: {}", e)))? {
             while let Some(Ok(msg)) = output.next().await {
                 match msg {
                     LogOutput::StdOut { message } => stdout.push_str(&String::from_utf8_lossy(&message)),
@@ -242,7 +246,7 @@ EOF", filename, escaped_code);
         }
     }
 
-    async fn execute_daytona(&self, _code: &str, _language: &str) -> Result<ToolOutput> {
+    async fn execute_daytona(&self, _code: &str, _language: &str) -> AgentResult<ToolOutput> {
         Ok(ToolOutput::failure("Daytona provider is currently disabled. Using local Docker."))
     }
 }
@@ -313,12 +317,12 @@ impl Tool for SandboxTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let action = params["action"].as_str().unwrap_or("run");
         
         match action {
             "run" => {
-                let code = params["code"].as_str().context("Missing code parameter")?;
+                let code = params["code"].as_str().ok_or_else(|| AgentError::Validation("Missing code parameter".to_string()))?;
                 let lang = params["language"].as_str().unwrap_or("python");
                 
                 match self.provider {

@@ -26,8 +26,31 @@ pub use provider::{LLMProvider, OllamaProvider, OpenAICompatibleProvider, Candle
 pub use cache::{LLMCache, CachedProvider};
 pub use nqd::NQDPortfolio;
 
-use anyhow::Result;
 use async_trait::async_trait;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AgentError {
+    #[error("LLM Provider error: {0}")]
+    Provider(String),
+    #[error("Parsing error: {0}")]
+    Parse(String),
+    #[error("Tool execution error: {0}")]
+    Tool(String),
+    #[error("Validation error: {0}")]
+    Validation(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+    #[error("PAI Core error: {0}")]
+    Pai(String),
+    #[error("Execution failed: {0}")]
+    Execution(String),
+}
+
+/// Specialized Result for Agent operations
+pub type AgentResult<T> = std::result::Result<T, AgentError>;
 
 /// Trait for specialized agents
 #[async_trait]
@@ -49,7 +72,7 @@ pub trait Agent: Send + Sync {
     fn model(&self) -> &str;
     
     /// Execute a query and return a response
-    async fn execute(&self, query: &str, context: Option<&str>) -> Result<AgentResponse>;
+    async fn execute(&self, query: &str, context: Option<&str>) -> AgentResult<AgentResponse>;
 }
 
 pub fn truncate(s: &str, max_len: usize) -> String {

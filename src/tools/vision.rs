@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -8,6 +7,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::io::Cursor;
 
+use crate::agent::{AgentResult, AgentError};
 use crate::tools::{Tool, ToolOutput};
 use screenshots::Screen;
 use nokhwa::pixel_format::RgbFormat;
@@ -48,29 +48,30 @@ impl VisionTool {
         Self::default()
     }
 
-    async fn capture_screen(&self, display_id: Option<usize>) -> Result<PathBuf> {
-        let screens = Screen::all()?;
+    async fn capture_screen(&self, display_id: Option<usize>) -> AgentResult<PathBuf> {
+        let screens = Screen::all().map_err(|e| AgentError::Tool(format!("Failed to list screens: {}", e)))?;
         let screen = if let Some(id) = display_id {
-            screens.get(id).context("Display not found")? 
+            screens.get(id).ok_or_else(|| AgentError::Tool("Display not found".to_string()))? 
         } else {
-            screens.first().context("No screens found")?
+            screens.first().ok_or_else(|| AgentError::Tool("No screens found".to_string()))?
         };
 
-        let image = screen.capture()?;
+        let image = screen.capture().map_err(|e| AgentError::Tool(format!("Failed to capture screen: {}", e)))?;
         let mut buffer = Vec::new();
         
         // Convert screenshots::Image to RgbaImage buffer then to DynamicImage
         let rgba_image = image::ImageBuffer::from_raw(image.width(), image.height(), image.into_raw())
-            .context("Failed to create image buffer")?;
+            .ok_or_else(|| AgentError::Tool("Failed to create image buffer".to_string()))?;
         let dynamic_image = DynamicImage::ImageRgba8(rgba_image);
         
-        dynamic_image.write_to(&mut Cursor::new(&mut buffer), ImageFormat::Png)?;
+        dynamic_image.write_to(&mut Cursor::new(&mut buffer), ImageFormat::Png)
+            .map_err(|e| AgentError::Tool(format!("Failed to encode image: {}", e)))?;
         
         let path = PathBuf::from("artifacts/last_screen.png");
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| AgentError::Io(e))?;
         }
-        std::fs::write(&path, buffer)?;
+        std::fs::write(&path, buffer).map_err(|e| AgentError::Io(e))?;
         
         let mut last = self.last_image.lock().await;
         *last = Some(path.clone());
@@ -78,21 +79,21 @@ impl VisionTool {
         Ok(path)
     }
 
-    async fn capture_camera(&self) -> Result<PathBuf> {
+    async fn capture_camera(&self) -> AgentResult<PathBuf> {
         let path = {
             // Simple camera capture using nokhwa
             let index = CameraIndex::Index(0);
             let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-            let mut camera = Camera::new(index, format)?;
-            camera.open_stream()?;
-            let frame = camera.frame()?;
-            let decoded = frame.decode_image::<RgbFormat>()?;
+            let mut camera = Camera::new(index, format).map_err(|e| AgentError::Tool(format!("Failed to open camera: {}", e)))?;
+            camera.open_stream().map_err(|e| AgentError::Tool(format!("Failed to open camera stream: {}", e)))?;
+            let frame = camera.frame().map_err(|e| AgentError::Tool(format!("Failed to capture frame: {}", e)))?;
+            let decoded = frame.decode_image::<RgbFormat>().map_err(|e| AgentError::Tool(format!("Failed to decode frame: {}", e)))?;
             
             let path = PathBuf::from("artifacts/last_camera.png");
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+                std::fs::create_dir_all(parent).map_err(|e| AgentError::Io(e))?;
             }
-            decoded.save(&path)?;
+            decoded.save(&path).map_err(|e| AgentError::Tool(format!("Failed to save frame: {}", e)))?;
             path
         };
         
@@ -102,7 +103,7 @@ impl VisionTool {
         Ok(path)
     }
 
-    async fn describe_image(&self, image_path: PathBuf, prompt: String) -> Result<String> {
+    async fn describe_image(&self, image_path: PathBuf, prompt: String) -> AgentResult<String> {
         // This is a heavy operation, we'll use Moondream2 via Candle
         let device = if candle_core::utils::metal_is_available() {
             Device::new_metal(0).unwrap_or(Device::Cpu)
@@ -116,66 +117,70 @@ impl VisionTool {
             let api = ApiBuilder::new().build()?;
             let repo = api.repo(Repo::new("santiagomed/candle-moondream".to_string(), hf_hub::RepoType::Model));
             repo.get("model-q4_0.gguf")
-        }).await??;
+        }).await.map_err(|e| AgentError::Execution(e.to_string()))?
+        .map_err(|e| AgentError::Tool(format!("Failed to download model: {}", e)))?;
 
         let tokenizer_file = tokio::task::spawn_blocking(move || {
             use hf_hub::{api::sync::ApiBuilder, Repo};
             let api = ApiBuilder::new().build()?;
             let repo = api.repo(Repo::new("vikhyatk/moondream2".to_string(), hf_hub::RepoType::Model));
             repo.get("tokenizer.json")
-        }).await??;
+        }).await.map_err(|e| AgentError::Execution(e.to_string()))?
+        .map_err(|e| AgentError::Tool(format!("Failed to download tokenizer: {}", e)))?;
 
-        let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(anyhow::Error::msg)?;
+        let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(|e| AgentError::Tool(e.to_string()))?;
         let config = candle_transformers::models::moondream::Config::v2();
         
-        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&model_file, &device)?;
-        let mut model = quantized_moondream::Model::new(&config, vb)?;
+        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&model_file, &device)
+            .map_err(|e| AgentError::Tool(format!("Failed to load model weights: {}", e)))?;
+        let mut model = quantized_moondream::Model::new(&config, vb)
+            .map_err(|e| AgentError::Tool(format!("Failed to create model: {}", e)))?;
 
         // Process image
-        let img = image::open(image_path)?;
+        let img = image::open(image_path).map_err(|e| AgentError::Tool(format!("Failed to open image: {}", e)))?;
         let img = img.resize_to_fill(378, 378, image::imageops::FilterType::Triangle).to_rgb8();
         let data = img.into_raw();
-        let data = Tensor::from_vec(data, (378, 378, 3), &Device::Cpu)?.permute((2, 0, 1))?;
-        let mean = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu)?.reshape((3, 1, 1))?;
-        let std = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu)?.reshape((3, 1, 1))?;
-        let image_tensor = (data.to_dtype(DType::F32)? / 255.)?.
-            broadcast_sub(&mean)?.
-            broadcast_div(&std)?.
-            to_device(&device)?.
-            unsqueeze(0)?;
+        let data = Tensor::from_vec(data, (378, 378, 3), &Device::Cpu).map_err(|e| AgentError::Tool(e.to_string()))?.permute((2, 0, 1)).map_err(|e| AgentError::Tool(e.to_string()))?;
+        let mean = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu).map_err(|e| AgentError::Tool(e.to_string()))?.reshape((3, 1, 1)).map_err(|e| AgentError::Tool(e.to_string()))?;
+        let std = Tensor::new(&[0.5f32, 0.5, 0.5], &Device::Cpu).map_err(|e| AgentError::Tool(e.to_string()))?.reshape((3, 1, 1)).map_err(|e| AgentError::Tool(e.to_string()))?;
+        let image_tensor = (data.to_dtype(DType::F32).map_err(|e| AgentError::Tool(e.to_string()))? / 255.).map_err(|e| AgentError::Tool(e.to_string()))?.
+            broadcast_sub(&mean).map_err(|e| AgentError::Tool(e.to_string()))?.
+            broadcast_div(&std).map_err(|e| AgentError::Tool(e.to_string()))?.
+            to_device(&device).map_err(|e| AgentError::Tool(e.to_string()))?.
+            unsqueeze(0).map_err(|e| AgentError::Tool(e.to_string()))?;
 
-        let image_embeds = image_tensor.apply(model.vision_encoder())?;
+        let image_embeds = image_tensor.apply(model.vision_encoder()).map_err(|e| AgentError::Tool(e.to_string()))?;
 
         // Generate response
         let full_prompt = format!("\n\nQuestion: {}\n\nAnswer:", prompt);
-        let tokens = tokenizer.encode(full_prompt, true).map_err(anyhow::Error::msg)?;
+        let tokens = tokenizer.encode(full_prompt, true).map_err(|e| AgentError::Tool(e.to_string()))?;
         let mut token_ids = tokens.get_ids().to_vec();
         
-        let special_token = *tokenizer.get_vocab(true).get("<|endoftext|>").context("No special token")?;
+        let special_token = *tokenizer.get_vocab(true).get("<|endoftext|>").ok_or_else(|| AgentError::Tool("Missing special token".to_string()))?;
         let mut logits_processor = LogitsProcessor::new(42, Some(0.7), Some(0.9));
         
         let mut result = String::new();
         for index in 0..512 {
             let context_size = if index > 0 { 1 } else { token_ids.len() };
             let ctxt = &token_ids[token_ids.len().saturating_sub(context_size)..];
-            let input = Tensor::new(ctxt, &device)?.unsqueeze(0)?;
+            let input = Tensor::new(ctxt, &device).map_err(|e| AgentError::Tool(e.to_string()))?.unsqueeze(0).map_err(|e| AgentError::Tool(e.to_string()))?;
             
             let logits = if index > 0 {
-                model.text_model.forward(&input)?
+                model.text_model.forward(&input).map_err(|e| AgentError::Tool(e.to_string()))?
             } else {
-                let bos_token = Tensor::new(&[special_token], &device)?.unsqueeze(0)?;
-                model.text_model.forward_with_img(&bos_token, &input, &image_embeds)?
+                let bos_token = Tensor::new(&[special_token], &device).map_err(|e| AgentError::Tool(e.to_string()))?.unsqueeze(0).map_err(|e| AgentError::Tool(e.to_string()))?;
+                model.text_model.forward_with_img(&bos_token, &input, &image_embeds).map_err(|e| AgentError::Tool(e.to_string()))?
             };
             
-            let logits = logits.squeeze(0)?.to_dtype(DType::F32)?;
-            let next_token = logits_processor.sample(&logits)?;
+            let logits = logits.squeeze(0).map_err(|e| AgentError::Tool(e.to_string()))?.to_dtype(DType::F32).map_err(|e| AgentError::Tool(e.to_string()))?;
+            let next_token = logits_processor.sample(&logits).map_err(|e| AgentError::Tool(e.to_string()))?;
             token_ids.push(next_token);
             
             if next_token == special_token || token_ids.ends_with(&[27, 10619, 29]) {
                 break;
             }
             
-            let token = tokenizer.decode(&[next_token], true).map_err(anyhow::Error::msg)?;
+            let token = tokenizer.decode(&[next_token], true).map_err(|e| AgentError::Tool(e.to_string()))?;
             result.push_str(&token);
         }
 
@@ -217,8 +222,8 @@ impl Tool for VisionTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
-        let p: VisionParams = serde_json::from_value(params)?;
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
+        let p: VisionParams = serde_json::from_value(params).map_err(|e| AgentError::Serde(e))?;
         
         match p.action.as_str() {
             "capture_screen" => {
@@ -239,7 +244,7 @@ impl Tool for VisionTool {
                 let source = p.image_source.unwrap_or_else(|| "last_capture".to_string());
                 let path = if source == "last_capture" {
                     let last = self.last_image.lock().await;
-                    last.clone().context("No image captured yet. Capture screen or camera first.")?
+                    last.clone().ok_or_else(|| AgentError::Validation("No image captured yet. Capture screen or camera first.".to_string()))?
                 } else {
                     PathBuf::from(source)
                 };

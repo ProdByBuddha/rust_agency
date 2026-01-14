@@ -256,6 +256,12 @@ impl CandleProvider {
                 Ok(LoadedModel::Quantized(Arc::new(Mutex::new(model)), tokenizer))
             } else if repo_id.to_lowercase().contains("qwen") {
                 let model_paths = get_model_paths(&repo)?;
+                // Security: Validate model paths are safe before mmap
+                for path in &model_paths {
+                    if !path.exists() || path.to_str().map(|s| s.contains("..")).unwrap_or(true) {
+                        return Err(anyhow::anyhow!("Security: Malicious model path detected: {:?}", path));
+                    }
+                }
                 let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&model_paths, DType::F16, &device)? };
                 
                 let config = if repo_id.contains("1.5B") || model_name_owned.contains("1.5b") {
@@ -270,6 +276,12 @@ impl CandleProvider {
                 Ok(LoadedModel::Reasoner(Arc::new(Mutex::new(model)), tokenizer))
             } else {
                 let model_paths = get_model_paths(&repo)?;
+                // Security: Validate model paths
+                for path in &model_paths {
+                    if !path.exists() || path.to_str().map(|s| s.contains("..")).unwrap_or(true) {
+                        return Err(anyhow::anyhow!("Security: Malicious model path detected: {:?}", path));
+                    }
+                }
                 let vb = unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&model_paths, DType::F16, &device)? };
                 
                 let config_filename = repo.get("config.json")?;
@@ -368,8 +380,13 @@ impl LLMProvider for CandleProvider {
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Forward pass error: {}", e))); break; }
                         };
 
-                        let logits = logits.squeeze(0).unwrap_or(logits);
-                        let next_token = match lp.sample(&logits.to_dtype(DType::F32).unwrap_or(logits.clone())) {
+                        let logits = logits.squeeze(0).map_err(|e| anyhow::anyhow!("Squeeze error: {}", e)).unwrap_or(logits);
+                        let logits_f32 = match logits.to_dtype(DType::F32) {
+                            Ok(l) => l,
+                            Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("DType conversion error: {}", e))); break; }
+                        };
+
+                        let next_token = match lp.sample(&logits_f32) {
                             Ok(t) => t,
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Sampling error: {}", e))); break; }
                         };
@@ -449,8 +466,13 @@ impl LLMProvider for CandleProvider {
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Forward pass error: {}", e))); break; }
                         };
 
-                        let logits = logits.squeeze(0).unwrap_or(logits);
-                        let next_token = match lp.sample(&logits.to_dtype(DType::F32).unwrap_or(logits.clone())) {
+                        let logits = logits.squeeze(0).map_err(|e| anyhow::anyhow!("Squeeze error: {}", e)).unwrap_or(logits);
+                        let logits_f32 = match logits.to_dtype(DType::F32) {
+                            Ok(l) => l,
+                            Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("DType conversion error: {}", e))); break; }
+                        };
+
+                        let next_token = match lp.sample(&logits_f32) {
                             Ok(t) => t,
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Sampling error: {}", e))); break; }
                         };
@@ -513,8 +535,13 @@ impl LLMProvider for CandleProvider {
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Forward pass error: {}", e))); break; }
                         };
 
-                        let logits = logits.squeeze(0).unwrap_or(logits);
-                        let next_token = match lp.sample(&logits.to_dtype(DType::F32).unwrap_or(logits.clone())) {
+                        let logits = logits.squeeze(0).map_err(|e| anyhow::anyhow!("Squeeze error: {}", e)).unwrap_or(logits);
+                        let logits_f32 = match logits.to_dtype(DType::F32) {
+                            Ok(l) => l,
+                            Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("DType conversion error: {}", e))); break; }
+                        };
+
+                        let next_token = match lp.sample(&logits_f32) {
                             Ok(t) => t,
                             Err(e) => { let _ = tx.send(Err(anyhow::anyhow!("Sampling error: {}", e))); break; }
                         };
@@ -652,7 +679,7 @@ impl LLMProvider for RemoteNexusProvider {
             .await?;
 
         // SOTA: The Nexus response is now strictly projected via MVPK logic.
-        Ok(res["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
+        Ok(res["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()).unwrap_or_else(|| "No response from Remote Nexus".to_string()))
     }
 
     async fn generate_stream(&self, _model: &str, prompt: String, system: Option<String>) -> Result<BoxStream<'static, Result<String>>> {

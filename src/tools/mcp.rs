@@ -3,7 +3,7 @@
 //! Allows rust_agency to act as an MCP client, connecting to external
 //! MCP servers over stdio and dynamically registering their tools.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use tracing::{info, debug};
 
+use crate::agent::{AgentResult, AgentError};
 use super::{Tool, ToolOutput};
 
 /// JSON-RPC 2.0 Request
@@ -59,7 +60,7 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub async fn spawn(name: &str, command: &str, args: &[String]) -> Result<Arc<Self>> {
+    pub async fn spawn(name: &str, command: &str, args: &[String]) -> anyhow::Result<Arc<Self>> {
         info!("Spawning MCP server '{}' via {} {:?}...", name, command, args);
         
         let child = Command::new(command)
@@ -82,7 +83,7 @@ impl McpServer {
         Ok(server)
     }
 
-    async fn call(&self, method: &str, params: Option<Value>) -> Result<Value> {
+    async fn call(&self, method: &str, params: Option<Value>) -> anyhow::Result<Value> {
         let mut id_lock = self.request_counter.lock().await;
         *id_lock += 1;
         let id = *id_lock;
@@ -119,7 +120,7 @@ impl McpServer {
         response.result.context("MCP response missing result and error")
     }
 
-    async fn initialize(&self) -> Result<()> {
+    async fn initialize(&self) -> anyhow::Result<()> {
         let params = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -144,13 +145,13 @@ impl McpServer {
         Ok(())
     }
 
-    pub async fn list_tools(&self) -> Result<Vec<McpToolDefinition>> {
+    pub async fn list_tools(&self) -> anyhow::Result<Vec<McpToolDefinition>> {
         let result = self.call("tools/list", None).await?;
         let tools: Vec<McpToolDefinition> = serde_json::from_value(result["tools"].clone())?;
         Ok(tools)
     }
 
-    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> anyhow::Result<Value> {
         let params = json!({
             "name": name,
             "arguments": arguments
@@ -186,12 +187,13 @@ impl Tool for McpProxyTool {
         self.definition.input_schema.clone()
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         info!("Executing MCP tool {}...", self.name());
-        let result = self.server.call_tool(&self.definition.name, params).await?;
+        let result = self.server.call_tool(&self.definition.name, params).await
+            .map_err(|e| AgentError::Tool(format!("MCP call failed: {}", e)))?;
         
         // MCP tools/call result has a 'content' field which is an array of blocks
-        let content = result["content"].as_array().context("Invalid MCP response: missing content array")?;
+        let content = result["content"].as_array().ok_or_else(|| AgentError::Tool("Invalid MCP response: missing content array".to_string()))?;
         
         let mut summary = String::new();
         for block in content {

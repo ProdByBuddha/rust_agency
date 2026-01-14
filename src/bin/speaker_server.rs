@@ -9,7 +9,7 @@ use candle_nn::Embedding;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokenizers::Tokenizer;
 use tracing::{info, warn, error, debug};
 use tracing_subscriber::FmtSubscriber;
@@ -30,7 +30,7 @@ impl ModelPool {
     fn new(models: Vec<T3Candle>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         for model in models {
-            tx.send(model).unwrap();
+            let _ = tx.send(model);
         }
         Self {
             receiver: Arc::new(tokio::sync::Mutex::new(rx)),
@@ -180,11 +180,9 @@ impl AudioEngine {
         tokio::spawn(async move {
             let mut pending = HashMap::new();
             let mut next_to_play = 0;
-            let mut received_count = 0;
             
             while let Some((idx, audio)) = audio_rx.recv().await {
                 pending.insert(idx, audio);
-                received_count += 1;
                 
                 while let Some(audio) = pending.remove(&next_to_play) {
                     if !audio.is_empty() {

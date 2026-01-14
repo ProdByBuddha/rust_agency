@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use tracing::{info, warn};
 use futures_util::future::join_all;
 
-use crate::agent::{ReActAgent, AgentType, AgentConfig, LLMCache, LLMProvider, AutonomousMachine, AgentResponse, OllamaProvider};
+use crate::agent::{ReActAgent, AgentType, AgentConfig, LLMCache, LLMProvider, AutonomousMachine, AgentResponse, OllamaProvider, AgentResult, AgentError};
 use crate::agent::rl::ExperienceBuffer;
 use crate::memory::{Memory, EpisodicMemory};
 use crate::emit_event;
@@ -21,7 +21,7 @@ use crate::orchestrator::{
     aggregation::{Candidate, Gamma, RewardModel},
     ResultPortfolio, ScaleProfile, AgencyEvent
 };
-use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
+use pai_core::{HookManager, HookEvent, HookEventType};
 
 pub struct SupervisorResult {
     pub answer: String,
@@ -93,11 +93,17 @@ impl Supervisor {
                 Arc::new(hm)
             },
             pai_memory: {
-                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| format!("{}/.config/pai", std::env::var("HOME").unwrap_or_default()));
+                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+                    format!("{}/.config/pai", home)
+                });
                 Arc::new(pai_core::memory::TieredMemoryManager::new(std::path::PathBuf::from(pai_dir)))
             },
             recovery: {
-                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| format!("{}/.config/pai", std::env::var("HOME").unwrap_or_default()));
+                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+                    format!("{}/.config/pai", home)
+                });
                 Arc::new(pai_core::recovery::RecoveryJournal::new(std::path::PathBuf::from(pai_dir)))
             },
         }
@@ -188,7 +194,7 @@ impl Supervisor {
     }
 
     #[tracing::instrument(skip(self, query), fields(query_len = query.len()))]
-    pub async fn handle(&mut self, query: &str) -> Result<SupervisorResult> {
+    pub async fn handle(&mut self, query: &str) -> AgentResult<SupervisorResult> {
         let _work_start_time = std::time::Instant::now();
         
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -201,14 +207,14 @@ impl Supervisor {
             timestamp: chrono::Utc::now(),
         };
         pai_core::enrichment::EnrichmentEngine::enrich(&mut start_event);
-        let _ = self.pai_hooks.trigger(&start_event).await?;
+        let _ = self.pai_hooks.trigger(&start_event).await.map_err(|e| AgentError::Pai(e.to_string()))?;
         let _ = self.pai_memory.log_event(&start_event);
 
         emit_event!(AgencyEvent::TurnStarted { 
             agent: "Supervisor".to_string(), 
             model: "Router".to_string() 
         });
-        let _ = self.history_manager.append(&session_id, "user", None, query).await;
+        let _ = self.history_manager.append(&session_id, "user", None, query).await.map_err(|e| AgentError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
         // SOTA: High-Fidelity Context Compaction (pi-mono-inspired)
         {
@@ -264,7 +270,7 @@ impl Supervisor {
         };
 
         let (memory_ctx, routing_result, project_ctx) = tokio::join!(memory_search_task, router_task, project_context_task);
-        let routing_decision = routing_result?;
+        let routing_decision = routing_result.map_err(|e| AgentError::Execution(e.to_string()))?;
 
         if let Some(ctx) = project_ctx {
             full_context.push_str(&ctx);
@@ -418,7 +424,7 @@ impl Supervisor {
             }
         }
 
-        let final_res = final_res.ok_or_else(|| anyhow::anyhow!("All execution attempts and escalations failed"))?;
+        let final_res = final_res.ok_or_else(|| AgentError::Execution("All execution attempts and escalations failed".to_string()))?;
         
         let mut work = crate::orchestrator::WorkRecord::new(
             "DirectTask".to_string(), 
@@ -449,11 +455,11 @@ impl Supervisor {
             self.episodic_memory.lock().await.add_assistant(&final_res.answer, Some(work.performer_role.clone()));
             
             // SOTA: Long-term History Persistence (codex-inspired)
-            let _ = self.history_manager.append(&session_id, "assistant", Some(&final_performer), &final_res.answer).await;
+            let _ = self.history_manager.append(&session_id, "assistant", Some(&final_performer), &final_res.answer).await.map_err(|e| AgentError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
             if let Some(ref sm) = self.session {
                 let mem = self.episodic_memory.lock().await;
-                sm.save(&mem, None).await?;
+                sm.save(&mem, None).await.map_err(|e| AgentError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
             }
         }
 
@@ -468,7 +474,7 @@ impl Supervisor {
         })
     }
 
-    pub async fn run_autonomous(&mut self, goal: &str) -> Result<SupervisorResult> {
+    pub async fn run_autonomous(&mut self, goal: &str) -> AgentResult<SupervisorResult> {
         let provider = self.create_cached_provider();
         let objective = Objective::new(goal);
         let mut machine = AutonomousMachine::new_with_provider(provider.clone(), self.tools.clone(), &self.profile, objective);

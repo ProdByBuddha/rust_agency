@@ -2,7 +2,6 @@
 // 
 // Implements the Reasoning + Acting framework for intelligent agent behavior.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use ollama_rs::Ollama;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use futures_util::StreamExt;
 
-use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaProvider, OpenAICompatibleProvider};
+use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaProvider, OpenAICompatibleProvider, AgentResult, AgentError};
 use crate::memory::Memory;
 use crate::tools::{ToolCall, ToolRegistry};
 use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
@@ -307,8 +306,9 @@ RULES:
                     prompt.push_str(&format!("[REASONING]\n{}\n", step.thought));
                 }
                 for action in &step.actions {
-                    let action_json = serde_json::to_string(action).unwrap_or_default();
-                    prompt.push_str(&format!("[ACTION]\n{}\n", action_json));
+                    if let Ok(action_json) = serde_json::to_string(action) {
+                        prompt.push_str(&format!("[ACTION]\n{}\n", action_json));
+                    }
                 }
                 for obs in &step.observations {
                     prompt.push_str(&format!("[OBSERVATION]\n{}\n", obs));
@@ -322,7 +322,7 @@ RULES:
     }
 
     /// Parse the LLM response using strict Tags
-    fn parse_response(&self, response: &str, _query: &str) -> Result<ReActStep> {
+    fn parse_response(&self, response: &str, _query: &str) -> AgentResult<ReActStep> {
         debug!("Raw LLM Response for parsing:\n{}", response);
 
         // HALLUCINATION GUARD: Truncate at [OBSERVATION] if model tried to simulate it
@@ -593,18 +593,19 @@ RULES:
     }
 
     /// Execute a single step of the ReAct loop with streaming
-    pub async fn step_stream(&self, query: &str, steps: &[ReActStep], context: Option<&str>) -> Result<ReActStep> {
+    pub async fn step_stream(&self, query: &str, steps: &[ReActStep], context: Option<&str>) -> AgentResult<ReActStep> {
         let prompt = self.build_react_prompt(query, steps, context).await;
         let system = Some(self.config.system_prompt.clone());
         
         debug!("ReAct prompt (streaming):\n{}", prompt);
         info!("   ⏳ Iteration starting (model: {})...", self.config.model);
 
-        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await?;
+        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await
+            .map_err(|e| AgentError::Provider(e.to_string()))?;
         let mut full_content = String::new();
 
         while let Some(chunk_res) = stream.next().await {
-            let chunk = chunk_res?;
+            let chunk = chunk_res.map_err(|e| AgentError::Provider(e.to_string()))?;
             full_content.push_str(&chunk);
             // SOTA: No token-by-token printing to stdout to avoid IO bottlenecks.
             // Tokens are streamed to the UI via the provider's internal tx channel.
@@ -618,13 +619,14 @@ RULES:
     /// Execute a single step of the ReAct loop
     pub async fn step(&self, query: &str, steps: &[
 ReActStep],
- context: Option<&str>) -> Result<ReActStep> {
+ context: Option<&str>) -> AgentResult<ReActStep> {
         let prompt = self.build_react_prompt(query, steps, context).await;
         let system = Some(self.config.system_prompt.clone());
         
         debug!("ReAct prompt:\n{}", prompt);
 
-        let content = self.provider.generate(&self.config.model, prompt, system).await?;
+        let content = self.provider.generate(&self.config.model, prompt, system).await
+            .map_err(|e| AgentError::Provider(e.to_string()))?;
 
         debug!("LLM response:\n{}", content);
 
@@ -657,7 +659,7 @@ impl Agent for ReActAgent {
         &self.config.model
     }
 
-    async fn execute(&self, query: &str, context: Option<&str>) -> Result<AgentResponse> {
+    async fn execute(&self, query: &str, context: Option<&str>) -> AgentResult<AgentResponse> {
         self.execute_with_steering(query, context, None).await
     }
 }
@@ -668,7 +670,7 @@ impl ReActAgent {
         query: &str, 
         context: Option<&str>,
         mut steering_rx: Option<tokio::sync::mpsc::Receiver<String>>
-    ) -> Result<AgentResponse> {
+    ) -> AgentResult<AgentResponse> {
         info!("ReAct agent starting execution for query: {}", query);
         
         let mut steps = Vec::new();
@@ -917,7 +919,7 @@ impl SimpleAgent {
         self
     }
 
-    pub async fn execute_simple(&self, query: &str, context: Option<&str>) -> Result<AgentResponse> {
+    pub async fn execute_simple(&self, query: &str, context: Option<&str>) -> AgentResult<AgentResponse> {
         let mut prompt = String::new();
         let system = Some(self.config.system_prompt.clone());
         
@@ -937,7 +939,8 @@ impl SimpleAgent {
 
         let _ = self.provider.notify(&format!("STATE:MODEL:{}", self.config.model)).await;
 
-        let content = self.provider.generate(&self.config.model, prompt, system).await?;
+        let content = self.provider.generate(&self.config.model, prompt, system).await
+            .map_err(|e| AgentError::Provider(e.to_string()))?;
         
         // MVPK Projection: Extract Thought (TechView) and Answer (PlainView)
         let mut thought = "Processing...".to_string();
@@ -1027,7 +1030,7 @@ impl SimpleAgent {
         query: &str, 
         context: Option<&str>,
         mut on_token: F
-    ) -> Result<AgentResponse> 
+    ) -> AgentResult<AgentResponse> 
     where
         F: FnMut(&str) + Send
     {
@@ -1050,7 +1053,8 @@ impl SimpleAgent {
         let _ = self.provider.notify(&format!("STATE:MODEL:{}", self.config.model)).await;
 
         // Use streaming generation
-        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await?;
+        let mut stream = self.provider.generate_stream(&self.config.model, prompt, system).await
+            .map_err(|e| AgentError::Provider(e.to_string()))?;
         let mut full_response = String::new();
         
         while let Some(chunk_result) = stream.next().await {
@@ -1126,9 +1130,9 @@ mod tests {
         let response = "[THOUGHT]\nI should check the weather.\n[ACTION]\n{\"name\": \"get_weather\", \"parameters\": {\"location\": \"Seattle\"}}\n";
         
         let thought = agent.extract_tag(response, "[THOUGHT]");
-        assert_eq!(thought.unwrap(), "I should check the weather.");
+        assert_eq!(thought.expect("Failed to extract thought"), "I should check the weather.");
         
         let action = agent.extract_tag(response, "[ACTION]");
-        assert_eq!(action.unwrap(), "{\"name\": \"get_weather\", \"parameters\": {\"location\": \"Seattle\"}}");
+        assert_eq!(action.expect("Failed to extract action"), "{\"name\": \"get_weather\", \"parameters\": {\"location\": \"Seattle\"}}");
     }
 }

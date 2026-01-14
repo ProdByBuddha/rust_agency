@@ -5060,6 +5060,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tempfile",
+ "thiserror 2.0.17",
  "tokenizers 0.20.4",
  "tokio",
  "tokio-stream",

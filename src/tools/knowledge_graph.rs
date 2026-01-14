@@ -3,11 +3,11 @@
 //! Queries the vector memory for entity relationships and formats them
 //! as Mermaid diagrams for visualization.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::agent::{AgentResult, AgentError};
 use crate::memory::Memory;
 use crate::tools::{Tool, ToolOutput};
 
@@ -64,11 +64,12 @@ impl Tool for KnowledgeGraphTool {
         })
     }
 
-    async fn execute(&self, params: Value) -> Result<ToolOutput> {
+    async fn execute(&self, params: Value) -> AgentResult<ToolOutput> {
         let limit = params["limit"].as_u64().unwrap_or(20) as usize;
 
         // Search for knowledge graph entries (across all contexts for now)
-        let results = self.memory.search("entity relationship knowledge graph distilled", limit * 5, None, None).await?;
+        let results = self.memory.search("entity relationship knowledge graph distilled", limit * 5, None, None).await
+            .map_err(|e| AgentError::Tool(format!("Memory search failed: {}", e)))?;
         
         let mut triples = Vec::new();
         for entry in results {
@@ -124,20 +125,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_knowledge_graph_tool_execute() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir");
         let path = temp_dir.path().join("memory.json");
-        let memory = Arc::new(VectorMemory::new(path).unwrap());
+        let memory = Arc::new(VectorMemory::new(path).expect("Failed to create memory"));
         
         // Seed some relationships
         let mut entry = MemoryEntry::new("Rust -> is a -> systems language", "test", MemorySource::Reflection);
         entry.metadata.tags.push("knowledge_graph".to_string());
-        memory.store(entry).await.unwrap();
+        memory.store(entry).await.expect("Failed to store memory");
         
         let tool = KnowledgeGraphTool::new(memory);
-        let res = tool.execute(json!({})).await.unwrap();
+        let res = tool.execute(json!({})).await.expect("Tool execution failed");
         
         assert!(res.success);
-        assert!(res.data["mermaid"].as_str().unwrap().contains("graph TD"));
-        assert!(res.data["mermaid"].as_str().unwrap().contains("Rust -- \"is a\" --> systems_language"));
+        assert!(res.data["mermaid"].as_str().expect("No mermaid output").contains("graph TD"));
+        assert!(res.data["mermaid"].as_str().expect("No mermaid output").contains("Rust -- \"is a\" --> systems_language"));
     }
 }
