@@ -58,3 +58,4 @@ pub use kind::{Kind, KindAlgebra};
 pub use evolution::{EvolutionEvent, EvolutionEngine};
 pub use debt::{HeuristicDebt, DebtRegistry};
 pub use event_bus::{AGENCY_EVENT_BUS, AgencyEvent};
+pub mod pai;

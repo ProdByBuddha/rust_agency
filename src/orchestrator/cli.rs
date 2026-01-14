@@ -86,6 +86,25 @@ impl App {
         let supervisor = self.supervisor.clone();
         let tx = self.event_tx.clone();
         
+        if query.starts_with("pai:") {
+            let request = query.strip_prefix("pai:").unwrap().trim().to_string();
+            tokio::spawn(async move {
+                let mut pai = crate::orchestrator::pai::PAIOrchestrator::new(
+                    pai_core::algorithm::EffortLevel::Standard,
+                    supervisor.clone()
+                );
+                match pai.run_task(&request).await {
+                    Ok(answer) => {
+                        let _ = tx.send(AppEvent::Response(answer, None)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+            return;
+        }
+        
         tokio::spawn(async move {
             let mut guard = supervisor.lock().await;
             match guard.handle(&query).await {
@@ -269,11 +288,32 @@ fn ui(f: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title(" 📊 Telemetry "));
     f.render_widget(status_para, sidebar_chunks[0]);
 
-    // Logs
-    let logs: Vec<ListItem> = app.logs.iter().map(|l| ListItem::new(l.as_str())).collect();
-    let logs_list = List::new(logs)
-        .block(Block::default().borders(Borders::ALL).title(" 📝 System Events "));
-    f.render_widget(logs_list, sidebar_chunks[1]);
+    // PAI: Algorithm Progression Banner
+    if app.is_orchestrating {
+        let (r, g, b) = pai_core::visuals::VisualRenderer::get_phase_color(&pai_core::algorithm::AlgorithmPhase::Execute);
+        let progress = pai_core::visuals::VisualRenderer::render_progress_bar(&pai_core::algorithm::AlgorithmPhase::Execute);
+        let banner = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("THE ALGORITHM ", Style::default().add_modifier(Modifier::BOLD).fg(Color::Rgb(r, g, b))),
+                Span::from(progress),
+            ]),
+            Line::from(vec![
+                Span::styled("Phase: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("EXECUTE ", Style::default().fg(Color::Rgb(r, g, b))),
+                Span::from("- Performing agent orchestration..."),
+            ])
+        ])
+        .block(Block::default().borders(Borders::ALL).title(" ⚙️ PAI Engine "));
+        
+        // Render this below telemetry if orchestrating
+        f.render_widget(banner, sidebar_chunks[1]);
+    } else {
+        // Logs
+        let logs: Vec<ListItem> = app.logs.iter().map(|l| ListItem::new(l.as_str())).collect();
+        let logs_list = List::new(logs)
+            .block(Block::default().borders(Borders::ALL).title(" 📝 System Events "));
+        f.render_widget(logs_list, sidebar_chunks[1]);
+    }
 
     // Input Area
     let input_title = if app.is_orchestrating { " 🌀 Steering active agents... " } else { " λ Input " };

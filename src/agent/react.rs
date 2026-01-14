@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaProvider, OpenAICompatibleProvider};
 use crate::memory::Memory;
 use crate::tools::{ToolCall, ToolRegistry};
+use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
 
 /// A single step in the ReAct loop
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +140,9 @@ pub struct ReActAgent {
     tools: Arc<ToolRegistry>,
     memory: Option<Arc<dyn Memory>>,
     safety: Option<Arc<tokio::sync::Mutex<crate::safety::SafetyGuard>>>,
+    pub pai_hooks: Option<Arc<HookManager>>,
+    pub pai_memory: Option<Arc<pai_core::memory::TieredMemoryManager>>,
+    pub recovery: Option<Arc<pai_core::recovery::RecoveryJournal>>,
 }
 
 impl ReActAgent {
@@ -159,6 +163,9 @@ impl ReActAgent {
             tools,
             memory: None,
             safety: None,
+            pai_hooks: None,
+            pai_memory: None,
+            recovery: None,
         }
     }
 
@@ -173,7 +180,25 @@ impl ReActAgent {
             tools,
             memory: None,
             safety: None,
+            pai_hooks: None,
+            pai_memory: None,
+            recovery: None,
         }
+    }
+
+    pub fn with_recovery(mut self, recovery: Arc<pai_core::recovery::RecoveryJournal>) -> Self {
+        self.recovery = Some(recovery);
+        self
+    }
+
+    pub fn with_hooks(mut self, hooks: Arc<HookManager>) -> Self {
+        self.pai_hooks = Some(hooks);
+        self
+    }
+
+    pub fn with_memory_manager(mut self, memory: Arc<pai_core::memory::TieredMemoryManager>) -> Self {
+        self.pai_memory = Some(memory);
+        self
     }
 
     pub fn with_provider(mut self, provider: Arc<dyn LLMProvider>) -> Self {
@@ -751,6 +776,56 @@ impl ReActAgent {
 
                 debug!("Executing {} tools in parallel", step.actions.len());
                 
+                // PAI: Trigger PreToolUse Hooks
+                if let Some(ref hm) = self.pai_hooks {
+                    for action in &step.actions {
+                        let mut event = HookEvent {
+                            event_type: HookEventType::PreToolUse,
+                            session_id: "agent-session".to_string(), // In a real system this would be passed down
+                            payload: serde_json::json!({
+                                "tool_name": action.name,
+                                "tool_input": action.parameters,
+                                "description": action.name // Temporary fallback for description matching
+                            }),
+                            timestamp: chrono::Utc::now(),
+                        };
+                        
+                        pai_core::enrichment::EnrichmentEngine::enrich(&mut event);
+
+                        match hm.trigger(&event).await {
+                            Ok(HookAction::Block(reason)) => {
+                                warn!("PAI Blocked tool {}: {}", action.name, reason);
+                                let mut blocked_steps = steps.clone();
+                                blocked_steps.push(ReActStep::thought(format!("SECURITY BLOCKED: {}", reason)));
+                                
+                                // Log the blocked event
+                                if let Some(ref mem) = self.pai_memory {
+                                    let mut blocked_event = event.clone();
+                                    blocked_event.payload["security_action"] = serde_json::json!("block");
+                                    blocked_event.payload["security_reason"] = serde_json::json!(reason);
+                                    let _ = mem.log_event(&blocked_event);
+                                }
+
+                                return Ok(AgentResponse::failure(format!("Security Block: {}", reason), blocked_steps, self.config.agent_type));
+                            },
+                            Ok(_) => {
+                                // Log the allowed event
+                                if let Some(ref mem) = self.pai_memory {
+                                    let _ = mem.log_event(&event);
+                                }
+
+                                // PAI: Trigger Recovery Snapshot for destructive tools
+                                if action.name == "Edit" || action.name == "Write" {
+                                    if let (Some(ref rec), Some(path)) = (&self.recovery, action.parameters["path"].as_str()) {
+                                        let _ = rec.snapshot(std::path::Path::new(path));
+                                    }
+                                }
+                            }
+                            Err(e) => warn!("PAI Hook error: {}", e),
+                        }
+                    }
+                }
+
                 for action in &step.actions {
                     crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallStarted { 
                         tool: action.name.clone() 

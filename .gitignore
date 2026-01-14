@@ -47,6 +47,17 @@ Thumbs.db
 agency_profile.json
 memory.json
 session.json
+current-isc.json
+ralph-loop.local.md
+
+# PAI Operational Data
+/MEMORY/
+/History/
+/State/
+/Signals/
+/observability/dist/
+/observability/node_modules/
+
 
 # IDEs
 .vscode/

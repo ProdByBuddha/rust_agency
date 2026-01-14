@@ -21,6 +21,7 @@ use crate::orchestrator::{
     aggregation::{Candidate, Gamma, RewardModel},
     ResultPortfolio, ScaleProfile, AgencyEvent
 };
+use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
 
 pub struct SupervisorResult {
     pub answer: String,
@@ -52,6 +53,12 @@ pub struct Supervisor {
     pub active_steer_txs: Arc<Mutex<Vec<mpsc::Sender<String>>>>,
     /// Queued messages for follow-up turns
     pub followup_queue: Arc<Mutex<VecDeque<String>>>,
+    /// PAI Pure Rust Hook Manager
+    pub pai_hooks: Arc<HookManager>,
+    /// PAI Tiered Memory Manager
+    pub pai_memory: Arc<pai_core::memory::TieredMemoryManager>,
+    /// PAI Recovery Journal
+    pub recovery: Arc<pai_core::recovery::RecoveryJournal>,
 }
 
 impl Supervisor {
@@ -79,6 +86,20 @@ impl Supervisor {
             experience_buffer: Arc::new(tokio::sync::Mutex::new(ExperienceBuffer::new(100))),
             active_steer_txs: Arc::new(Mutex::new(Vec::new())),
             followup_queue: Arc::new(Mutex::new(VecDeque::new())),
+            pai_hooks: {
+                let mut hm = HookManager::new();
+                hm.register(Arc::new(pai_core::safety::SecurityValidator::new()));
+                hm.register(Arc::new(pai_core::hooks::LoggerHook));
+                Arc::new(hm)
+            },
+            pai_memory: {
+                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| format!("{}/.config/pai", std::env::var("HOME").unwrap_or_default()));
+                Arc::new(pai_core::memory::TieredMemoryManager::new(std::path::PathBuf::from(pai_dir)))
+            },
+            recovery: {
+                let pai_dir = std::env::var("PAI_DIR").unwrap_or_else(|_| format!("{}/.config/pai", std::env::var("HOME").unwrap_or_default()));
+                Arc::new(pai_core::recovery::RecoveryJournal::new(std::path::PathBuf::from(pai_dir)))
+            },
         }
     }
 
@@ -170,16 +191,23 @@ impl Supervisor {
     pub async fn handle(&mut self, query: &str) -> Result<SupervisorResult> {
         let _work_start_time = std::time::Instant::now();
         
+        let session_id = uuid::Uuid::new_v4().to_string();
+
+        // PAI: Trigger and LOG SessionStart Event
+        let mut start_event = HookEvent {
+            event_type: HookEventType::SessionStart,
+            session_id: session_id.clone(),
+            payload: serde_json::json!({ "query": query }),
+            timestamp: chrono::Utc::now(),
+        };
+        pai_core::enrichment::EnrichmentEngine::enrich(&mut start_event);
+        let _ = self.pai_hooks.trigger(&start_event).await?;
+        let _ = self.pai_memory.log_event(&start_event);
+
         emit_event!(AgencyEvent::TurnStarted { 
             agent: "Supervisor".to_string(), 
             model: "Router".to_string() 
         });
-
-        // SOTA: Early memory update for real-time metrics
-        self.episodic_memory.lock().await.add_user(query);
-        
-        // SOTA: Long-term History Persistence (codex-inspired)
-        let session_id = uuid::Uuid::new_v4().to_string(); // In a real system this would come from session manager
         let _ = self.history_manager.append(&session_id, "user", None, query).await;
 
         // SOTA: High-Fidelity Context Compaction (pi-mono-inspired)
@@ -313,13 +341,19 @@ impl Supervisor {
                 let tools = self.tools.clone();
                 let memory = self.memory.clone();
                 let safety = self.safety.clone();
+                let hooks = self.pai_hooks.clone();
+                let pai_mem = self.pai_memory.clone();
+                let recovery = self.recovery.clone();
                 
                 let (steer_tx, steer_rx) = mpsc::channel(10);
                 self.active_steer_txs.lock().await.push(steer_tx);
 
                 execution_tasks.push(tokio::spawn(async move {
                     let _permit = semaphore.acquire().await.ok();
-                    let mut agent = ReActAgent::new_with_provider(provider, config, tools);
+                    let mut agent = ReActAgent::new_with_provider(provider, config, tools)
+                        .with_hooks(hooks)
+                        .with_memory_manager(pai_mem)
+                        .with_recovery(recovery);
                     if let Some(ref memory) = memory { agent = agent.with_memory(memory.clone()); }
                     agent = agent.with_safety(safety);
                     agent.execute_with_steering(&query_owned, Some(&context_owned), Some(steer_rx)).await
