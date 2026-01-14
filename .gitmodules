@@ -1,3 +1,18 @@
 [submodule "candle"]
 	path = candle
 	url = https://github.com/ProdByBuddha/candle.git
+[submodule "FPF"]
+	path = FPF
+	url = https://github.com/ailev/FPF.git
+[submodule "FossFLOW"]
+	path = FossFLOW
+	url = https://github.com/ProdByBuddha/FossFLOW.git
+[submodule "onnx"]
+	path = onnx
+	url = https://github.com/ProdByBuddha/onnx.git
+[submodule "onnxruntime"]
+	path = onnxruntime
+	url = https://github.com/ProdByBuddha/onnxruntime.git
+[submodule "ort"]
+	path = ort
+	url = https://github.com/ProdByBuddha/ort.git
