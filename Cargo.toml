@@ -2,6 +2,7 @@
 name = "rust_agency"
 version = "0.2.0"
 edition = "2021"
+default-run = "rust_agency"
 
 [dependencies]
 # Core async runtime and error handling
@@ -93,10 +94,6 @@ axum = { version = "0.8.8", features = ["ws", "macros"] }
 tower = "0.5.2"
 tower-http = { version = "0.6.2", features = ["trace"] }
 tokio-stream = "0.1.18"
-
-[[bin]]
-name = "nexus_server"
-path = "src/bin/nexus_server.rs"
 
 [dev-dependencies]
 tempfile = "3.23.0"

@@ -10,15 +10,13 @@ use tokio::sync::{Mutex, broadcast};
 use anyhow::Result;
 use chrono;
 use std::convert::Infallible;
-use rust_agency::agent::{Speaker, LLMProvider, CandleProvider};
 use futures_util::{StreamExt, SinkExt};
 use axum::http::StatusCode;
 use tower_http::trace::TraceLayer;
 
-// Agency Imports
-use rust_agency::memory::{VectorMemory, Memory, EpisodicMemory};
-use rust_agency::orchestrator::{Supervisor, SessionManager, profile::ProfileManager, aggregation::LLMRewardModel};
-use rust_agency::tools::*;
+use crate::agent::{Speaker, LLMProvider};
+use crate::memory::EpisodicMemory;
+use crate::orchestrator::Supervisor;
 
 // --- SOTA: Robust Error Handling ---
 struct ServerError(anyhow::Error);
@@ -38,21 +36,19 @@ impl<E> From<E> for ServerError where E: Into<anyhow::Error> {
 }
 
 #[derive(Clone)]
-struct AppState {
-    provider: Arc<dyn LLMProvider>,
-    start_local: String,
-    speaker: Arc<Mutex<Speaker>>,
-    tx: broadcast::Sender<String>,
-    episodic_memory: Arc<Mutex<EpisodicMemory>>,
-    supervisor: Arc<Mutex<Supervisor>>,
-    current_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>
+pub struct AppState {
+    pub provider: Arc<dyn LLMProvider>,
+    pub start_local: String,
+    pub speaker: Arc<Mutex<Speaker>>,
+    pub tx: broadcast::Sender<String>,
+    pub episodic_memory: Arc<Mutex<EpisodicMemory>>,
+    pub supervisor: Arc<Mutex<Supervisor>>,
+    pub current_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>
 }
 
 #[derive(Deserialize)]
 struct ChatRequest {
     messages: Vec<Message>,
-    max_tokens: Option<usize>,
-    temperature: Option<f64>,
     #[serde(default)]
     stream: bool,
 }
@@ -140,101 +136,13 @@ impl SentenceBuffer {
     }
 }
 
-#[tokio::main] async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
-    let start_local = chrono::Local::now().format("%H:%M:%S").to_string();
-    
-    // SOTA: Info-level logging default
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-    
+pub async fn run_server(state: AppState) -> Result<()> {
     println!("🏛️  Initializing Nexus SOTA Server...\n");
     
-    let (tx, _) = broadcast::channel(1024);
-    let mut speaker = Speaker::new()?;
-    let _ = speaker.init_default_voice().await;
-    let speaker = Arc::new(Mutex::new(speaker));
-    let episodic_memory = Arc::new(Mutex::new(EpisodicMemory::default()));
-
-    let memory_file = "memory.json";
-    let session_file = "session.json";
-    let profile_file = "agency_profile.json";
-
-    let agency_memory: Arc<dyn Memory> = Arc::new(VectorMemory::new(memory_file).expect("Failed to init agency memory"));
-    let manager = Arc::new(rust_agency::memory::MemoryManager::new(agency_memory.clone()));
-    let session_manager = SessionManager::new(session_file);
-    let profile_manager = ProfileManager::new(profile_file);
-    let profile = profile_manager.load().await.unwrap_or_default();
-
-    let tools = Arc::new(ToolRegistry::default());
+    let tx_metrics = state.tx.clone();
+    let mem_metrics = state.episodic_memory.clone();
+    let start_local_metrics = state.start_local.clone();
     
-    // SOTA: Concurrent Tool Registration (FPF Principle: Rapid Capability Establishment)
-    tokio::join!(
-        tools.register_instance(WebSearchTool::new()),
-        tools.register_instance(CodeExecTool::new()),
-        tools.register_instance(MemoryQueryTool::new(agency_memory.clone())),
-        tools.register_instance(KnowledgeGraphTool::new(agency_memory.clone())),
-        tools.register_instance(ArtifactTool::default()),
-        tools.register_instance(SandboxTool::default()),
-        tools.register_instance(CodebaseTool::default()),
-        tools.register_instance(ModelManager),
-        tools.register_instance(SpeakerRsTool::new(speaker.clone())),
-        tools.register_instance(VisualizationTool::new()),
-        tools.register_instance(ScienceTool::new()),
-        tools.register_instance(VisionTool::new()),
-        tools.register_instance(SystemTool::new(manager.clone())),
-        tools.register_instance(ForgeTool::new("custom_tools", tools.clone()))
-    );
-
-    // SOTA: Load all previously forged dynamic tools (Laboratory graduation)
-    let _ = tools.load_dynamic_tools("standard_tools").await;
-    if let Ok(count) = tools.load_dynamic_tools("custom_tools").await {
-        if count > 0 {
-            println!("🛠️  Loaded {} dynamic tools from laboratory ('custom_tools').", count);
-        }
-    }
-
-    // SOTA: Force CPU inference for stability with quantized models
-    std::env::set_var("AGENCY_FORCE_CPU", "1");
-
-    // SOTA: Use CandleProvider for unified inference (Supports Llama, Quantized, and Reasoner/Qwen)
-    let provider_impl = CandleProvider::new()?;
-    let publishing_provider = rust_agency::agent::PublishingProvider::new(Arc::new(provider_impl), tx.clone());
-    let provider: Arc<dyn LLMProvider> = Arc::new(publishing_provider);
-
-    // SOTA: Reinforcement Learning Infrastructure
-    // 1. Experience Buffer for collecting trajectories
-    let experience_buffer = Arc::new(Mutex::new(rust_agency::agent::rl::ExperienceBuffer::new(1000)));
-    
-    // 2. Reward Model (Self-Judge)
-    let reward_model = Arc::new(LLMRewardModel::new(provider.clone(), "standard".to_string()));
-
-    let mut supervisor = Supervisor::new_with_provider(provider.clone(), tools.clone())
-        .with_memory(agency_memory.clone())
-        .with_session(session_manager)
-        .with_profile(profile)
-        .with_episodic_memory(episodic_memory.clone())
-        .with_max_retries(2)
-        .with_experience_buffer(experience_buffer.clone())
-        .with_reward_model(reward_model);
-    
-    let _ = supervisor.load_session().await;
-    let supervisor = Arc::new(Mutex::new(supervisor));
-
-    let state = AppState {
-        provider,
-        start_local: start_local.clone(),
-        speaker,
-        tx: tx.clone(),
-        episodic_memory: episodic_memory.clone(),
-        supervisor,
-        current_task: Arc::new(Mutex::new(None)),
-    };
-
-    let tx_metrics = tx.clone();
-    let mem_metrics = episodic_memory.clone();
-    let start_local_metrics = start_local.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
@@ -257,23 +165,9 @@ impl SentenceBuffer {
     println!("🚀 SOTA Backend Ready: http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await; // Removed shutdown signal to allow main thread to control shutdown if needed, or we can re-add it.
 
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async { tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler") };
-    #[cfg(unix)]
-    let terminate = async { 
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler").recv().await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
-    println!("🛑 Signal received, shutting down gracefully...");
 }
 
 async fn clear_memory(State(state): State<AppState>) -> impl IntoResponse {
@@ -389,9 +283,9 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
             gfm: true
         }});
 
-        ws.onmessage = (e) => {{
+        ws.onmessage = (e) => {{ 
             const data = e.data;
-            if (data.startsWith('METRICS:')) {{ try {{ const m = JSON.parse(data.substring(8)); document.getElementById('uptime-val').textContent = m.since; document.getElementById('memory-val').textContent = m.memory + ' Turns'; }} catch (err) {{}} }} // Corrected: removed extra braces
+            if (data.startsWith('METRICS:')) {{ try {{ const m = JSON.parse(data.substring(8)); document.getElementById('uptime-val').textContent = m.since; document.getElementById('memory-val').textContent = m.memory + ' Turns'; }} catch (err) {{}} }} 
             else if (data.startsWith('THOUGHT:') || (!isAnswerMode && data.startsWith('TOKEN:'))) {{
                 const token = data.startsWith('TOKEN:') ? data.substring(6) : data.substring(8);
                 if (!currentTechBlock) {{ currentTechBlock = document.createElement('span'); techContent.appendChild(currentTechBlock); }}
@@ -401,8 +295,8 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
             }} else if (data.startsWith('ANSWER:') || (isAnswerMode && data.startsWith('TOKEN:'))) {{
                 isAnswerMode = true;
                 const token = data.startsWith('TOKEN:') ? data.substring(6) : data.substring(7);
-                if (!currentPlainBlock) {{ currentPlainBlock = document.createElement('div'); currentPlainBlock.className = 'message-nexus'; plainContent.appendChild(currentPlainBlock); currentPlainRaw = ''; }}
-                let clean = token.replace(/[[A-Z]ANSWER\]|ANSWER:/gi, '');
+                if (!currentPlainBlock) {{ currentPlainBlock = document.createElement('div'); currentPlainBlock.className = 'message-nexus'; plainContent.appendChild(currentPlainBlock); currentPlainRaw = ''; }} 
+                let clean = token.replace(/[[A-Z]ANSWER]|ANSWER:/gi, '');
                 if (currentPlainRaw === '') clean = clean.replace(/^]\s*/, '');
                 currentPlainRaw += clean;
                 currentPlainBlock.innerHTML = marked.parse(currentPlainRaw);
@@ -422,26 +316,31 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
                 const val = parseFloat(data.substring(12));
                 rValue.textContent = val.toFixed(2);
                 logAssurance('Audit', 'R-Score: ' + val.toFixed(2));
-            }} else if (data.startsWith('ASSURANCE:')) {{ try {{ const a = JSON.parse(data.substring(10)); logAssurance('Telemetry', `Latency: ${{a.latency}}ms`); logAssurance('Telemetry', `Tool Calls: ${{a.tools}}`); logAssurance('Telemetry', `Evidence Nodes: ${{a.evidence}}`); logAssurance('Telemetry', `Scale Class: ${{a.scale}}`); logAssurance('Telemetry', `Model: ${{a.model}}`); document.getElementById('model-val').textContent = a.model; }} catch (err) {{}} }} // Corrected: removed extra braces
+            }} else if (data.startsWith('ASSURANCE:')) {{ try {{ const a = JSON.parse(data.substring(10)); logAssurance('Telemetry', `Latency: ${{a.latency}}ms`); logAssurance('Telemetry', `Tool Calls: ${{a.tools}}`); logAssurance('Telemetry', `Evidence Nodes: ${{a.evidence}}`); logAssurance('Telemetry', `Scale Class: ${{a.scale}}`); logAssurance('Telemetry', `Model: ${{a.model}}`); document.getElementById('model-val').textContent = a.model; }} catch (err) {{}} }}
             else if (data.startsWith('STATE:MODEL:')) {{ document.getElementById('model-val').textContent = data.substring(12); }}
-            else if (data.startsWith('🚀 Request') || data.startsWith('STATE:')) {{
-                if (data.startsWith('STATE:ANSWER_START')) {{ isAnswerMode = true; currentPlainBlock = null; currentPlainRaw = ''; if (currentTechBlock) {{ const full = currentTechBlock.textContent; const match = full.match(/[[A-Z]ANSWER\]*|ANSWER:?$/i); if (match) currentTechBlock.textContent = full.substring(0, match.index).trim(); }} }} 
-                else if (data.startsWith('STATE:THOUGHT_START')) {{ isAnswerMode = false; currentTechBlock = null; }} // Corrected: removed extra braces
-                else if (data.startsWith('STATE:TURN_COMPLETE') || data.startsWith('STATE:STOPPED')) {{ isAnswerMode = false; currentTechBlock = null; currentPlainBlock = null; currentPlainRaw = ''; sendBtn.style.display = 'inline-block'; stopBtn.style.display = 'none'; }} // Corrected: removed extra braces
-                else {{ isAnswerMode = false; currentTechBlock = null; currentPlainBlock = null; currentPlainRaw = ''; if (data.startsWith('🚀 Request')) {{ techContent.innerHTML += '<div style="color:#444; margin:15px 0; border-top:1px solid #222; padding-top:10px;">--- NEW TURN ---</div>'; assuranceLog.innerHTML = ''; rValue.textContent = '1.00'; sendBtn.style.display = 'none'; stopBtn.style.display = 'inline-block'; }} }} // Corrected: removed extra braces
+            else if (data.startsWith('STATE:')) {{
+                if (data.startsWith('STATE:ANSWER_START')) {{ isAnswerMode = true; currentPlainBlock = null; currentPlainRaw = ''; if (currentTechBlock) {{ const full = currentTechBlock.textContent; const match = full.match(/[[A-Z]ANSWER]*|ANSWER:?$/i); if (match) currentTechBlock.textContent = full.substring(0, match.index).trim(); }} }} 
+                else if (data.startsWith('STATE:THOUGHT_START')) {{ isAnswerMode = false; currentTechBlock = null; }} 
+                else if (data.startsWith('STATE:TURN_COMPLETE') || data.startsWith('STATE:STOPPED')) {{ isAnswerMode = false; currentTechBlock = null; currentPlainBlock = null; currentPlainRaw = ''; sendBtn.style.display = 'inline-block'; stopBtn.style.display = 'none'; }} 
+                else if (data.startsWith('STATE:ABORTED')) {{ isAnswerMode = false; currentTechBlock = null; currentPlainBlock = null; currentPlainRaw = ''; }}
+                logAssurance('System', data);
+            }} else if (data.startsWith('🚀 Request')) {{
+                isAnswerMode = false; currentTechBlock = null; currentPlainBlock = null; currentPlainRaw = ''; 
+                techContent.innerHTML += '<div style="color:#444; margin:15px 0; border-top:1px solid #222; padding-top:10px;">--- NEW TURN ---</div>'; 
+                assuranceLog.innerHTML = ''; rValue.textContent = '1.00'; sendBtn.style.display = 'none'; stopBtn.style.display = 'inline-block';
                 logAssurance('System', data);
             }}
         }};
 
-        function logAssurance(source, msg) {{
+        function logAssurance(source, msg) {{ 
             const div = document.createElement('div');
             div.style.marginBottom = '5px';
-            div.innerHTML = `<span style="color:#333;">[${{new Date().toLocaleTimeString()}}]</span> <b>${{source}}:</b> ${{msg}}`; // Corrected: removed extra braces
+            div.innerHTML = `<span style="color:#333;">[${{new Date().toLocaleTimeString()}}]</span> <b>${{source}}:</b> ${{msg}}`;
             assuranceLog.appendChild(div);
             assuranceLog.scrollTop = assuranceLog.scrollHeight;
         }}
 
-        function sendQuery() {{
+        function sendQuery() {{ 
             const val = chatInput.value.trim();
             if (!val) return;
             const div = document.createElement('div');
@@ -453,13 +352,13 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
             document.getElementById('plain-scroll').scrollTop = plainContent.scrollHeight;
         }}
 
-        function stopInference() {{
+        function stopInference() {{ 
             ws.send(JSON.stringify({{ type: 'stop' }}));
         }}
 
         chatInput.addEventListener('keypress', (e) => {{ if (e.key === 'Enter') sendQuery(); }});
 
-        async function clearMemory() {{
+        async function clearMemory() {{ 
             if (!confirm('Wipe episodic memory?')) return;
             await fetch('/v1/memory/clear', {{ method: 'POST' }});
             location.reload();
@@ -495,9 +394,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
                         let current_task = state_c.current_task.clone();
                         
                         // Abort existing task
-                        { let mut task_guard = current_task.lock().await; if let Some(handle) = task_guard.take() { handle.abort(); let _ = tx.send("STATE:ABORTED".to_string()); } }
+                        { let mut task_guard = current_task.lock().await; if let Some(handle) = task_guard.take() { handle.abort(); let _ = tx.send("STATE:ABORTED".to_string()); } } 
 
-                        let handle = tokio::spawn(async move {{
+                        let handle = tokio::spawn(async move {{ 
                             let mut supervisor = supervisor.lock().await;
                             let _ = tx.send(format!("🚀 Request: Orchestrating Agency..."));
                             let result = supervisor.handle(&query).await;
@@ -536,8 +435,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
                 }
             }
         }
-}
-)
+    })
 }
 
 async fn chat_completions(
@@ -548,15 +446,15 @@ async fn chat_completions(
     let history = {{ let mut memory = state.episodic_memory.lock().await; if !last_msg.is_empty() {{ memory.add_user(&last_msg); }} memory.format_as_chatml() }};
 
     let prompt = format!(
-        "<|im_start|>system\nYou are a high-fidelity intelligence layer. \nFollow the First Principles Framework (FPF): ALWAYS separate internal thought from external communication. \nUse [THOUGHT] for your internal reasoning and [ANSWER] for the final user surface.<|im_end|>\n{}\n<|im_start|>assistant\n[THOUGHT]\n",
+        "<|im_start|>system\nYou are a high-fidelity intelligence layer. 
+Follow the First Principles Framework (FPF): ALWAYS separate internal thought from external communication. 
+Use [THOUGHT] for your internal reasoning and [ANSWER] for the final user surface.<|im_end|>\n{}\n<|im_start|>assistant\n[THOUGHT]\n",
         history
     );
 
     let tx = state.tx.clone();
     let _ = tx.send(format!("🚀 Request (Streaming Inference)"));
 
-    // Use CandleProvider to generate stream
-    // NOTE: This now routes to Qwen/Llama/Quantized via provider.rs!
     let mut stream = state.provider.generate_stream("standard", prompt, None).await
         .map_err(|e| ServerError(e))?;
 
@@ -607,7 +505,7 @@ async fn chat_completions(
             }
         }
         let mut memory = state.episodic_memory.lock().await;
-        memory.add_assistant(&full_response, Some("Nexus".to_string()));
+        memory.add_assistant(full_response.clone(), Some("Nexus".to_string()));
         Ok(Json(ChatResponse { choices: vec![Choice { message: Message { role: "assistant".to_string(), content: full_response } } ] }).into_response())
     }
 }

@@ -42,7 +42,7 @@ struct App {
 }
 
 impl App {
-    fn new(supervisor: Supervisor, speaker: Arc<Mutex<crate::orchestrator::Speaker>>) -> Self {
+    fn new(supervisor: Arc<Mutex<Supervisor>>, speaker: Arc<Mutex<crate::orchestrator::Speaker>>) -> Self {
         let (tx, rx) = mpsc::channel(100);
         
         // Subscribe to global agency events
@@ -60,7 +60,7 @@ impl App {
             logs: Vec::new(),
             status: "Idle".to_string(),
             is_orchestrating: false,
-            supervisor: Arc::new(Mutex::new(supervisor)),
+            supervisor,
             last_publication: None,
             speaker,
             event_rx: rx,
@@ -111,12 +111,12 @@ impl App {
 }
 
 pub struct AgencyCLI {
-    supervisor: Supervisor,
+    supervisor: Arc<Mutex<Supervisor>>,
     speaker: Arc<Mutex<crate::orchestrator::Speaker>>,
 }
 
 impl AgencyCLI {
-    pub fn new(supervisor: Supervisor, speaker: Arc<Mutex<crate::orchestrator::Speaker>>) -> Self {
+    pub fn new(supervisor: Arc<Mutex<Supervisor>>, speaker: Arc<Mutex<crate::orchestrator::Speaker>>) -> Self {
         Self { supervisor, speaker }
     }
 

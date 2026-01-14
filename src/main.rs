@@ -13,15 +13,17 @@ use anyhow::Result;
 use ollama_rs::Ollama;
 use std::sync::Arc;
 use tracing::info;
+use tokio::sync::{Mutex, broadcast};
 
-use rust_agency::memory::{Memory, VectorMemory, MemoryManager};
+use rust_agency::memory::{Memory, VectorMemory, MemoryManager, EpisodicMemory};
 use rust_agency::orchestrator::{Supervisor, SessionManager, Speaker, profile::ProfileManager};
 use rust_agency::tools::{
     Tool, ToolRegistry, WebSearchTool, CodeExecTool, MemoryQueryTool, 
     KnowledgeGraphTool, ArtifactTool, SandboxTool, CodebaseTool, 
     SystemTool, ForgeTool, VisualizationTool, 
-    SpeakerRsTool, ScienceTool, ModelManager
+    SpeakerRsTool, ScienceTool, ModelManager, VisionTool
 };
+use rust_agency::server::{run_server, AppState};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION
@@ -89,6 +91,7 @@ async fn main() -> Result<()> {
     println!("{}\n", "═".repeat(60));
 
     let config = AgencyConfig::default();
+    let start_local = chrono::Local::now().format("%H:%M:%S").to_string();
     
     // Initialize memory system
     let memory: Arc<dyn Memory> = Arc::new(
@@ -98,6 +101,9 @@ async fn main() -> Result<()> {
     
     // Initialize MemoryManager for resource tracking
     let manager = Arc::new(MemoryManager::new(memory.clone()));
+    
+    // Initialize Episodic Memory for Chat History
+    let episodic_memory = Arc::new(Mutex::new(EpisodicMemory::default()));
 
     // Primary LLM Provider: Use Remote Nexus (Llama 3.2 3B) to avoid reload lag
     println!("🌐 Connecting to Remote Nexus Model Server (Llama 3.2 3B)...");
@@ -125,6 +131,7 @@ async fn main() -> Result<()> {
         tools.register_instance(SpeakerRsTool::new(shared_speaker.clone())),
         tools.register_instance(VisualizationTool::new()),
         tools.register_instance(ScienceTool::new()),
+        tools.register_instance(VisionTool::new()),
         tools.register_instance(ForgeTool::new("custom_tools", tools.clone())),
         tools.register_instance(SystemTool::new(manager.clone()))
     );
@@ -180,9 +187,10 @@ async fn main() -> Result<()> {
     println!("👤 Agency Profile loaded: {}", profile.name);
 
     // Initialize supervisor
-    let mut supervisor = Supervisor::new_with_provider(provider, tools.clone())
+    let mut supervisor = Supervisor::new_with_provider(provider.clone(), tools.clone())
         .with_memory(memory.clone())
         .with_session(session_manager)
+        .with_episodic_memory(episodic_memory.clone())
         .with_profile(profile)
         .with_max_retries(2);
 
@@ -196,9 +204,36 @@ async fn main() -> Result<()> {
     } else {
         println!("💾 Session restored from '{}'", config.session_file);
     }
+    
+    // Wrap Supervisor in Shared Mutex for Hybrid Access
+    let shared_supervisor = Arc::new(Mutex::new(supervisor));
+    let (tx, _) = broadcast::channel(1024);
 
-    // Launch the professional FPF-aligned CLI with SHARED speaker
-    let mut cli = rust_agency::orchestrator::cli::AgencyCLI::new(supervisor, shared_speaker);
+    // ──────────────────────────────────────────────────────────────────────────
+    // HYBRID MODE: Spawn Server in Background
+    // ──────────────────────────────────────────────────────────────────────────
+    let server_state = AppState {
+        provider: provider.clone(),
+        start_local,
+        speaker: shared_speaker.clone(),
+        tx: tx.clone(),
+        episodic_memory: episodic_memory.clone(),
+        supervisor: shared_supervisor.clone(),
+        current_task: Arc::new(Mutex::new(None)),
+    };
+    
+    println!("🌐 Spawning Nexus Server (Background) at http://localhost:8002...");
+    tokio::spawn(async move {
+        if let Err(e) = run_server(server_state).await {
+            eprintln!("❌ Server crashed: {}", e);
+        }
+    });
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // LAUNCH CLI (Foreground)
+    // ──────────────────────────────────────────────────────────────────────────
+    // Launch the professional FPF-aligned CLI with SHARED speaker and supervisor
+    let mut cli = rust_agency::orchestrator::cli::AgencyCLI::new(shared_supervisor, shared_speaker);
     cli.run().await?;
 
     Ok(())

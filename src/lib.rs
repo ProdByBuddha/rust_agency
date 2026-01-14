@@ -15,6 +15,7 @@ pub mod safety;
 pub mod fpf;
 pub mod models;
 pub mod utils;
+pub mod server;
 
 // Re-exports for convenience
 pub use agent::AgentType;
