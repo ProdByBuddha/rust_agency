@@ -133,7 +133,7 @@ impl SandboxTool {
     }
 
     async fn execute_local_docker(&self, code: &str, language: &str) -> AgentResult<ToolOutput> {
-        info!("Initializing local Docker sandbox for {}...", language);
+        info!("Initializing local Docker/Podman sandbox for {}...", language);
         
         let docker = Docker::connect_with_local_defaults()
             .map_err(|e| AgentError::Tool(format!("Failed to connect to Docker Desktop: {}", e)))?;
@@ -300,7 +300,7 @@ impl Tool for SandboxTool {
     fn work_scope(&self) -> Value {
         let env = match self.provider {
             SandboxProvider::MacOSNative => "native macos seatbelt (ultra-low latency)",
-            SandboxProvider::Local => "isolated docker container",
+            SandboxProvider::Local => "isolated Docker/Podman container",
             _ => "remote sandbox",
         };
         

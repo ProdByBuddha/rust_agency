@@ -15,6 +15,7 @@ A state-of-the-art, semi-autonomous multi-agent system built in Rust. This agenc
 - **📚 Semantic Memory**: Integrates **ChromaDB** and **fastembed** for high-performance vector storage and retrieval.
 - **🗣️ SOTA Audio Engine**: Features **T3 Turbo** and **Candle** for local, privacy-focused, and high-quality voice synthesis.
 - **🛡️ Enterprise Safety**: Process hardening, input validation, and content filtering.
+- **🔒 Deep Isolation**: Hybrid security architecture using **macOS Seatbelt** for low-latency host hardening and **Podman** for rootless code execution.
 - **🔭 Observability**: Built-in **OpenTelemetry** tracing for deep system introspection.
 - **🛠️ Extensible Tool System**: Dynamic tool loading, **Forge** for creating tools on-the-fly, and Markdown-based **Skill Discovery**.
 
@@ -53,6 +54,7 @@ The agency comes with a powerful registry of tools (`src/tools/`):
 
 ### Prerequisites
 - **Rust Toolchain**: [Install Rust](https://www.rust-lang.org/tools/install) (1.75+).
+- **Podman**: Required for sandboxed code execution and infrastructure. (`brew install podman podman-compose`)
 - **Python 3.10+**: (Optional) For some utility scripts and ONNX exports.
 - **Ollama** or **Local Models**: Ensure you have an LLM backend available (Llama 3, Mistral, etc.).
 

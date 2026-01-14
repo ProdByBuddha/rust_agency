@@ -492,6 +492,34 @@ impl Supervisor {
         })
     }
 
+    /// Internal logic for A2A (Agent-to-Agent) direct requests
+    pub async fn handle_peer_request(
+        &mut self, 
+        agent_type: AgentType, 
+        query: &str, 
+        extra_context: Option<&str>
+    ) -> AgentResult<AgentResponse> {
+        info!("Supervisor: Handling peer request for {:?}", agent_type);
+        
+        let mut config = AgentConfig::new(agent_type, &self.profile);
+        config.reasoning_enabled = true; // A2A always uses reasoning tags
+        
+        let mut full_context = String::new();
+        if let Some(ctx) = extra_context {
+            full_context.push_str(ctx);
+        }
+
+        let provider = self.create_cached_provider();
+        let tools = self.tools.clone();
+        
+        let mut agent = ReActAgent::new_with_provider(provider, config, tools)
+            .with_hooks(self.pai_hooks.clone())
+            .with_memory_manager(self.pai_memory.clone())
+            .with_recovery(self.recovery.clone());
+            
+        agent.execute(query, Some(&full_context)).await
+    }
+
     pub async fn run_autonomous(&mut self, goal: &str) -> AgentResult<SupervisorResult> {
         let provider = self.create_cached_provider();
         let objective = Objective::new(goal);

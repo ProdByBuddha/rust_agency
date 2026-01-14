@@ -20,6 +20,7 @@ mod models;
 mod vision;
 mod mcp;
 mod skills;
+mod a2a;
 
 pub use web_search::WebSearchTool;
 pub use speaker_rs::SpeakerRsTool;
@@ -36,6 +37,7 @@ pub use science::ScienceTool;
 pub use models::ModelManager;
 pub use vision::VisionTool;
 pub use dynamic::{DynamicTool, ForgeTool};
+pub use a2a::PeerAgentTool;
 pub use mcp::{McpServer, McpProxyTool};
 pub use skills::{MarkdownSkill, SkillLoader};
 

@@ -15,6 +15,10 @@ The central nervous system. It orchestrates the lifecycle of a query:
 - **Optimal Info Selection**: Implements Decision Sensitivity logic to resolve plan-critical uncertainties before execution.
 - **Scaling-Law Lens (SLL)**: Predicts task complexity and selects the smallest sufficient model to minimize resource consumption.
 
+## 🤝 A2A Collaboration (`a2a.rs`)
+
+Implements the Agent-to-Agent communication protocol. Agents can consult specialized peers (e.g., a Researcher consulting a Coder) via the `PeerAgentTool`, using **SNS** notation for recursive context passing without token bloat.
+
 ## ⚖️ Governance & Audit
 
 - **DRR (Design-Rationale Record) (`drr.rs`)**: Automatically records the "Why" behind every major system decision.

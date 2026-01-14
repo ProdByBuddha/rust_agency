@@ -207,6 +207,21 @@ async fn main() -> Result<()> {
     
     // Wrap Supervisor in Shared Mutex for Hybrid Access
     let shared_supervisor = Arc::new(Mutex::new(supervisor));
+
+    // SOTA: Register A2A Peer Tools (Agent-to-Agent)
+    // Allows agents to consult specialized peers (Coder, Researcher, etc.)
+    {
+        let mut supervisor_guard = shared_supervisor.lock().await;
+        let tools = supervisor_guard.tools.clone();
+        tokio::join!(
+            tools.register_instance(rust_agency::tools::PeerAgentTool::new(rust_agency::AgentType::Coder, shared_supervisor.clone())),
+            tools.register_instance(rust_agency::tools::PeerAgentTool::new(rust_agency::AgentType::Researcher, shared_supervisor.clone())),
+            tools.register_instance(rust_agency::tools::PeerAgentTool::new(rust_agency::AgentType::Reasoner, shared_supervisor.clone())),
+            tools.register_instance(rust_agency::tools::PeerAgentTool::new(rust_agency::AgentType::Reviewer, shared_supervisor.clone())),
+            tools.register_instance(rust_agency::tools::RemoteAgencyTool::new())
+        );
+    }
+
     let (tx, _) = broadcast::channel(1024);
 
     // ──────────────────────────────────────────────────────────────────────────

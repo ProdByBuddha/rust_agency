@@ -1,0 +1,33 @@
+(version 1)
+(deny default)
+
+(allow process-exec*)
+(allow process-fork)
+
+;; Networking: Listen for OTLP
+(allow network-bind (local ip "localhost:4317"))
+(allow network-bind (local ip "localhost:4318"))
+(allow network-bind (local ip "localhost:8888")) ;; Metrics/Health
+
+;; Networking: Outbound (local)
+(allow network-outbound (remote ip "localhost:*"))
+
+;; File Access: Config
+(allow file-read* (subpath "/Users/javoerokour/Desktop/BUDDHA/CODE/LAB/agency/otel-config.yaml"))
+
+;; File Access: Logs
+(allow file-read* file-write* (subpath "/Users/javoerokour/Desktop/BUDDHA/CODE/LAB/agency/logs"))
+
+;; System requirements for Go runtime
+(allow sysctl-read)
+(allow file-read* (subpath "/usr/lib"))
+(allow file-read* (subpath "/usr/share"))
+(allow file-read* (subpath "/System/Library"))
+(allow file-read* (literal "/dev/null"))
+(allow file-read* (literal "/dev/urandom"))
+(allow file-read* (literal "/etc/hosts"))
+(allow file-read* (literal "/etc/resolv.conf"))
+
+;; Darwin specific
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow mach-lookup (global-name "com.apple.system.logger"))

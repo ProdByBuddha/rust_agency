@@ -156,6 +156,7 @@ pub async fn run_server(state: AppState) -> Result<()> {
         .route("/", get(dashboard))
         .route("/ws", get(ws_handler))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/a2a/interact", post(a2a_interact_handler))
         .route("/v1/memory/clear", post(clear_memory))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -173,6 +174,22 @@ async fn clear_memory(State(state): State<AppState>) -> impl IntoResponse {
         let _ = supervisor.clear_history().await;
     }
     (StatusCode::OK, Json(serde_json::json!({ "status": "cleared" })))
+}
+
+async fn a2a_interact_handler(
+    State(state): State<AppState>,
+    Json(interaction): Json<crate::orchestrator::a2a::AgentInteraction>,
+) -> Result<impl IntoResponse, ServerError> {
+    let mut supervisor = state.supervisor.lock().await;
+    
+    // Process the peer request
+    let response = supervisor.handle_peer_request(
+        interaction.target_agent,
+        &interaction.payload,
+        None // Context could be extracted from interaction.trace_context in future
+    ).await?;
+
+    Ok(Json(response))
 }
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {

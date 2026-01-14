@@ -16,3 +16,13 @@ services:
         limits:
           memory: 4G
     restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: agency-jaeger
+    ports:
+      - "16686:16686" # Web UI
+      - "4317:4317"  # OTLP gRPC (used by collector)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
