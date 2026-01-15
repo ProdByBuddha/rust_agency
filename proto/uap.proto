@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package uap.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// The Universal Agent Protocol Service
+service AgentService {
+  // Create a new task for the agent
+  rpc CreateTask(CreateTaskRequest) returns (Task);
+  
+  // Execute a single step of a task
+  rpc ExecuteStep(ExecuteStepRequest) returns (Step);
+  
+  // List all tasks assigned to this agent
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  
+  // Get details of a specific task
+  rpc GetTask(GetTaskRequest) returns (Task);
+  
+  // List all steps taken for a task
+  rpc ListSteps(ListStepsRequest) returns (ListStepsResponse);
+  
+  // List all artifacts produced by a task
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+}
+
+// Data Models
+message Task {
+  string task_id = 1;
+  string input = 2;
+  repeated Artifact artifacts = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+  TaskStatus status = 6;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_CREATED = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_COMPLETED = 3;
+  TASK_STATUS_FAILED = 4;
+}
+
+message Step {
+  string step_id = 1;
+  string task_id = 2;
+  string name = 3;
+  optional string input = 4;
+  optional string output = 5;
+  StepStatus status = 6;
+  repeated Artifact artifacts = 7;
+  bool is_last = 8;
+  // FPF Extension: Phase-specific metadata
+  map<string, string> phase_metadata = 9;
+}
+
+enum StepStatus {
+  STEP_STATUS_UNSPECIFIED = 0;
+  STEP_STATUS_CREATED = 1;
+  STEP_STATUS_RUNNING = 2;
+  STEP_STATUS_COMPLETED = 3;
+  STEP_STATUS_FAILED = 4;
+}
+
+message Artifact {
+  string artifact_id = 1;
+  string file_name = 2;
+  optional string relative_path = 3;
+  // Sovereignty Extension: Bitcoin-attested hash
+  optional string hash = 4;
+}
+
+// Request/Response Envelopes
+message CreateTaskRequest {
+  string input = 1;
+  optional google.protobuf.Struct additional_input = 2;
+}
+
+message ExecuteStepRequest {
+  string task_id = 1;
+  optional google.protobuf.Struct input = 2;
+}
+
+message ListTasksRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  string next_page_token = 2;
+}
+
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message ListStepsRequest {
+  string task_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListStepsResponse {
+  repeated Step steps = 1;
+  string next_page_token = 2;
+}
+
+message ListArtifactsRequest {
+  string task_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListArtifactsResponse {
+  repeated Artifact artifacts = 1;
+  string next_page_token = 2;
+}

@@ -99,6 +99,11 @@ tokio-stream = "0.1.18"
 # PAI Pure Rust Core
 pai-core = { path = "pai-core" }
 
+# gRPC and Protobuf for UAP
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
 # Tor/Arti for Anonymous A2A
 arti-client = { path = "arti/crates/arti-client", features = ["full", "tokio", "native-tls"] }
 tor-rtcompat = { path = "arti/crates/tor-rtcompat", features = ["tokio", "native-tls"] }
@@ -106,3 +111,4 @@ tor-rtcompat = { path = "arti/crates/tor-rtcompat", features = ["tokio", "native
 [dev-dependencies]
 tempfile = "3.23.0"
 tokio-test = "0.4"
+tonic-build = "0.12"

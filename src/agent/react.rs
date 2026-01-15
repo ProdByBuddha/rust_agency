@@ -13,6 +13,7 @@ use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaP
 use crate::memory::Memory;
 use crate::tools::{ToolCall, ToolRegistry};
 use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
+use pai_core::uap::{SovereignAgent, UapTask, UapStep, UapTaskStatus, UapStepStatus, UapArtifact};
 
 /// A single step in the ReAct loop
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,7 +215,47 @@ impl ReActAgent {
         self.safety = Some(safety);
         self
     }
+}
 
+#[async_trait]
+impl SovereignAgent for ReActAgent {
+    async fn create_task(&self, input: &str, _additional_input: Option<serde_json::Value>) -> AgentResult<UapTask> {
+        let task = UapTask::new(input);
+        // SOTA: In a full impl, we would persist this to the tiered memory
+        Ok(task)
+    }
+
+    async fn execute_step(&self, task_id: &str, input: Option<serde_json::Value>) -> AgentResult<UapStep> {
+        let mut step = UapStep::new(task_id, "ReAct Step");
+        step.status = UapStepStatus::Running;
+
+        let query = input.and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Continue with task".to_string());
+
+        // Execute one iteration of the ReAct loop
+        let res = self.execute(&query, None).await?;
+
+        step.output = Some(res.answer);
+        step.status = UapStepStatus::Completed;
+        step.is_last = true; // For now, we execute full turns as single UAP steps
+
+        Ok(step)
+    }
+
+    async fn list_steps(&self, task_id: &str) -> AgentResult<Vec<UapStep>> {
+        Ok(vec![]) // Placeholder for persistence
+    }
+
+    async fn get_task(&self, task_id: &str) -> AgentResult<UapTask> {
+        Ok(UapTask::new("Not found")) // Placeholder for persistence
+    }
+
+    async fn list_artifacts(&self, task_id: &str) -> AgentResult<Vec<UapArtifact>> {
+        Ok(vec![])
+    }
+}
+
+impl ReActAgent {
     /// Build the ReAct prompt
     async fn build_react_prompt(&self, query: &str, steps: &[
 ReActStep],
