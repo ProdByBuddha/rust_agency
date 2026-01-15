@@ -27,10 +27,13 @@ hf-hub = "0.4.0"
 
 # Memory system - Vector DB + Embeddings
 chromadb = "0.3"
-fastembed = "4"
+fastembed = "5"
 
-# ML Inference
-ort = { version = "2.0.0-rc.9", features = ["coreml"] }
+# ML Inference - Local Source
+# Disabled download-binaries to prevent TLS build errors
+# ort = { path = "crates/ort", default-features = false, features = ["load-dynamic", "coreml", "half"] }
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["load-dynamic", "coreml", "half"] }
+
 tokenizers = "0.20"
 ndarray = "0.15.6"
 ndarray-rand = "0.14"
@@ -108,7 +111,13 @@ prost-types = "0.13"
 arti-client = { path = "arti/crates/arti-client", features = ["full", "tokio", "native-tls"] }
 tor-rtcompat = { path = "arti/crates/tor-rtcompat", features = ["tokio", "native-tls"] }
 
+# Desktop Version (Tauri)
+tauri = { version = "2.9", features = ["macos-private-api"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+tauri-build = "2.5"
+
 [dev-dependencies]
 tempfile = "3.23.0"
 tokio-test = "0.4"
-tonic-build = "0.12"

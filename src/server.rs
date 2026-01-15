@@ -186,7 +186,7 @@ async fn a2a_interact_handler(
     let response = supervisor.handle_peer_request(
         interaction.target_agent,
         &interaction.payload,
-        None // Context could be extracted from interaction.trace_context in future
+        None 
     ).await?;
 
     Ok(Json(response))
@@ -194,10 +194,9 @@ async fn a2a_interact_handler(
 
 async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
     let start_local = state.start_local.clone();
-    let initial_model = "-".to_string(); // Initial model display will be updated by state messages
-    let memory_count = {{ let memory = state.episodic_memory.lock().await; memory.len() }};
+    let initial_model = "-".to_string(); 
+    let memory_count = { let memory = state.episodic_memory.lock().await; memory.len() };
     
-    // NOTE: HTML content uses double braces {{ }} for escaping in format! macro.
     Html(format!(r####"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -327,7 +326,7 @@ async fn dashboard(State(state): State<AppState>) -> impl IntoResponse {
                     currentPlainBlock.querySelectorAll('pre code').forEach((block) => hljs.highlightElement(block));
                     document.getElementById('plain-scroll').scrollTop = plainContent.scrollHeight;
                 }}
-            else if (data.startsWith('RELIABILITY:')) {{
+            }} else if (data.startsWith('RELIABILITY:')) {{
                 const val = parseFloat(data.substring(12));
                 rValue.textContent = val.toFixed(2);
                 logAssurance('Audit', 'R-Score: ' + val.toFixed(2));
@@ -439,7 +438,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
                         // Abort existing task
                         { let mut task_guard = current_task.lock().await; if let Some(handle) = task_guard.take() { handle.abort(); let _ = tx.send("STATE:ABORTED".to_string()); } } 
 
-                        let handle = tokio::spawn(async move {{ 
+                        let handle = tokio::spawn(async move { 
                             let mut supervisor = supervisor.lock().await;
                             let _ = tx.send(format!("🚀 Request: Orchestrating Agency..."));
                             let result = supervisor.handle(&query).await;
@@ -464,7 +463,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
                             }
                             
                             let _ = tx.send(format!("STATE:TURN_COMPLETE"));
-                        }});
+                        });
                         
                         *current_task.lock().await = Some(handle.abort_handle());
                     } else if json["type"] == "stop" {
@@ -486,7 +485,7 @@ async fn chat_completions(
     Json(req): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, ServerError> {
     let last_msg = req.messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    let history = {{ let mut memory = state.episodic_memory.lock().await; if !last_msg.is_empty() {{ memory.add_user(&last_msg); }} memory.format_as_chatml() }};
+    let history = { let mut memory = state.episodic_memory.lock().await; if !last_msg.is_empty() { memory.add_user(&last_msg); } memory.format_as_chatml() };
 
     let prompt = format!(
         "<|im_start|>system\nYou are a high-fidelity intelligence layer. 
@@ -505,7 +504,7 @@ Use [THOUGHT] for your internal reasoning and [ANSWER] for the final user surfac
         let (sse_tx, sse_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
         let state_c = state.clone();
         
-        tokio::task::spawn(async move {{
+        tokio::task::spawn(async move {
             let mut tts = SentenceBuffer::new(state_c.speaker.clone());
             let mut full_response = String::new();
             let mut answer_started = false;
@@ -515,12 +514,12 @@ Use [THOUGHT] for your internal reasoning and [ANSWER] for the final user surfac
                     full_response.push_str(&text);
 
                     // SOTA: Proactive Stop Detection (Direct Endpoint)
-                    if full_response.ends_with("<|im_end|>") || full_response.ends_with("<|eot_id|>") {{ break; }}
+                    if full_response.ends_with("<|im_end|>") || full_response.ends_with("<|eot_id|>") { break; }
 
-                    if !answer_started && (full_response.contains("[ANSWER]") || full_response.to_uppercase().contains("ANSWER:")) {{
+                    if !answer_started && (full_response.contains("[ANSWER]") || full_response.to_uppercase().contains("ANSWER:")) {
                         answer_started = true;
                         let _ = state_c.tx.send("STATE:ANSWER_START".to_string());
-                    }}
+                    }
                     if answer_started {
                         let clean = text.replace("[ANSWER]", "").replace("ANSWER:", "");
                         let _ = state_c.tx.send(format!("ANSWER:{}", clean));
@@ -537,7 +536,7 @@ Use [THOUGHT] for your internal reasoning and [ANSWER] for the final user surfac
             let mut memory = state_c.episodic_memory.lock().await;
             memory.add_assistant(full_response, Some("Nexus".to_string()));
             let _ = sse_tx.send(Ok(Event::default().data("[DONE]")));
-        }});
+        });
         Ok(Sse::new(tokio_stream::wrappers::UnboundedReceiverStream::new(sse_rx)).into_response())
     } else {
         // Non-streaming fallback

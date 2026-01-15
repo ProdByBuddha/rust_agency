@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use ollama_rs::Ollama;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 use futures_util::StreamExt;
 
@@ -13,7 +14,10 @@ use super::{Agent, AgentConfig, AgentType, is_action_query, LLMProvider, OllamaP
 use crate::memory::Memory;
 use crate::tools::{ToolCall, ToolRegistry};
 use pai_core::{HookManager, HookEvent, HookEventType, HookAction};
-use pai_core::uap::{SovereignAgent, UapTask, UapStep, UapTaskStatus, UapStepStatus, UapArtifact};
+use pai_core::uap::{SovereignAgent, UapTask, UapStep, UapStepStatus, UapArtifact};
+
+use pai_core::vcp::{ValueCommitment, CommitmentModality, EconomicImpact};
+use pai_core::sap::{AlignmentEngine, AlignmentAudit, AuditStatus};
 
 /// A single step in the ReAct loop
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,21 +223,66 @@ impl ReActAgent {
 
 #[async_trait]
 impl SovereignAgent for ReActAgent {
-    async fn create_task(&self, input: &str, _additional_input: Option<serde_json::Value>) -> AgentResult<UapTask> {
-        let task = UapTask::new(input);
-        // SOTA: In a full impl, we would persist this to the tiered memory
+    async fn create_task(&self, input: &str, commitment: Option<ValueCommitment>) -> anyhow::Result<UapTask> {
+        let mut task = UapTask::new(input);
+        
+        // L5: Perform automatic alignment check during creation
+        let audit = self.audit_alignment(input, false).await?;
+        task.audit = Some(audit);
+        
+        task.commitment = commitment;
         Ok(task)
     }
 
-    async fn execute_step(&self, task_id: &str, input: Option<serde_json::Value>) -> AgentResult<UapStep> {
+    async fn propose_commitment(&self, input: &str) -> anyhow::Result<ValueCommitment> {
+        // DSGM: Estimate economic impact before starting
+        let mut impact = EconomicImpact::default();
+        
+        // SOTA Heuristics for Labor Decoupling
+        let q = input.to_lowercase();
+        if q.contains("refactor") || q.contains("architect") {
+            impact.labor_decoupling_score = 8.0;
+            impact.capital_generation_score = 0.9;
+        } else if q.contains("fix") || q.contains("typo") {
+            impact.labor_decoupling_score = 0.5;
+            impact.capital_generation_score = 0.1;
+        } else {
+            impact.labor_decoupling_score = 2.0;
+            impact.capital_generation_score = 0.4;
+        }
+
+        let mut commitment = ValueCommitment::new("pending", "agent-1", CommitmentModality::Aspirational);
+        commitment.impact = impact;
+        
+        Ok(commitment)
+    }
+
+    async fn audit_alignment(&self, input: &str, override_lever: bool) -> anyhow::Result<AlignmentAudit> {
+        let engine = AlignmentEngine::sovereign_defaults();
+        let metadata = HashMap::new(); // In full impl, pass relevant context
+        Ok(engine.audit(input, &metadata, override_lever))
+    }
+
+    async fn execute_step(&self, task_id: &str, input: Option<serde_json::Value>) -> anyhow::Result<UapStep> {
         let mut step = UapStep::new(task_id, "ReAct Step");
+        
+        let query = input.as_ref().and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "Continue with task".to_string());
+
+        // L5 Check: Ensure we aren't blocked before executing
+        let audit = self.audit_alignment(&query, false).await?;
+        if audit.status == AuditStatus::Blocked {
+            return Err(anyhow::anyhow!("BLOCKED: Action violates Sovereign Alignment Protocol. Pull the Sovereign Lever to override."));
+        }
+
         step.status = UapStepStatus::Running;
 
         let query = input.and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "Continue with task".to_string());
 
         // Execute one iteration of the ReAct loop
-        let res = self.execute(&query, None).await?;
+        let res = self.execute(&query, None).await
+            .map_err(|e| anyhow::anyhow!(e))?;
 
         step.output = Some(res.answer);
         step.status = UapStepStatus::Completed;
@@ -242,15 +291,15 @@ impl SovereignAgent for ReActAgent {
         Ok(step)
     }
 
-    async fn list_steps(&self, task_id: &str) -> AgentResult<Vec<UapStep>> {
+    async fn list_steps(&self, _task_id: &str) -> anyhow::Result<Vec<UapStep>> {
         Ok(vec![]) // Placeholder for persistence
     }
 
-    async fn get_task(&self, task_id: &str) -> AgentResult<UapTask> {
+    async fn get_task(&self, _task_id: &str) -> anyhow::Result<UapTask> {
         Ok(UapTask::new("Not found")) // Placeholder for persistence
     }
 
-    async fn list_artifacts(&self, task_id: &str) -> AgentResult<Vec<UapArtifact>> {
+    async fn list_artifacts(&self, _task_id: &str) -> anyhow::Result<Vec<UapArtifact>> {
         Ok(vec![])
     }
 }

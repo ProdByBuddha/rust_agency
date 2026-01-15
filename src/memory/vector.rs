@@ -123,8 +123,8 @@ impl LocalVectorMemory {
                 }
             }
         }
-        let embedder_lock = self.embedder.read().await;
-        let embedder = embedder_lock.as_ref().unwrap();
+        let mut embedder_lock = self.embedder.write().await;
+        let embedder = embedder_lock.as_mut().unwrap();
         let mut embeddings = embedder.embed(texts.to_vec(), None)?;
         for emb in &mut embeddings { Self::normalize(emb); }
         Ok(embeddings)

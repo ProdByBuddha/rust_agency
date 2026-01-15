@@ -816,6 +816,44 @@ impl LLMProvider for OpenAICompatibleProvider {
     }
 }
 
+pub fn dynamic_provider() -> Arc<dyn LLMProvider> {
+    let provider_type = std::env::var("AGENCY_PROVIDER").unwrap_or_else(|_| "nexus".to_string());
+    
+    match provider_type.to_lowercase().as_str() {
+        "ollama" => {
+            let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());
+            let port = std::env::var("OLLAMA_PORT").unwrap_or_else(|_| "11434".to_string())
+                .parse::<u16>().unwrap_or(11434);
+            
+            println!("🦙 Initializing Ollama Provider at {}:{}...", host, port);
+            let client = ollama_rs::Ollama::new(host, port);
+            Arc::new(OllamaProvider::new(client))
+        }
+        "turbo" | "ollama-cloud" => {
+            let base_url = "https://api.ollama.com/v1".to_string();
+            let api_key = std::env::var("OLLAMA_API_KEY").ok();
+            
+            println!("🚀 Initializing Ollama Turbo Cloud (SOTA) at {}...", base_url);
+            Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
+        }
+        "openai" | "cloud" => {
+            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            let api_key = std::env::var("OPENAI_API_KEY").ok();
+            
+            println!("☁️  Initializing OpenAI-Compatible Cloud Provider at {}...", base_url);
+            Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
+        }
+        "candle" | "native" => {
+            println!("🦀 Initializing Native Candle (Rust) Provider...");
+            Arc::new(CandleProvider::new().expect("Failed to initialize Candle provider"))
+        }
+        _ => {
+            println!("🌐 Initializing Remote Nexus Provider (Default)...");
+            Arc::new(RemoteNexusProvider::new())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

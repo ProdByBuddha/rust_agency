@@ -17,6 +17,7 @@ pub mod models;
 pub mod utils;
 pub mod server;
 pub mod services;
+pub mod desktop;
 
 // Re-exports for convenience
 pub use agent::AgentType;

@@ -24,6 +24,12 @@ service AgentService {
   
   // List all artifacts produced by a task
   rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+
+  // VCP Extension: Propose an economic commitment for a potential task
+  rpc ProposeCommitment(ProposeCommitmentRequest) returns (ValueCommitment);
+
+  // SAP Extension: Perform an L5 alignment audit
+  rpc AuditAlignment(AuditAlignmentRequest) returns (AlignmentAudit);
 }
 
 // Data Models
@@ -34,6 +40,57 @@ message Task {
   google.protobuf.Timestamp created_at = 4;
   google.protobuf.Timestamp updated_at = 5;
   TaskStatus status = 6;
+  // L4 Extension: Associated commitment
+  optional ValueCommitment commitment = 7;
+  // L5 Extension: Alignment audit result
+  optional AlignmentAudit audit = 8;
+}
+
+message AlignmentAudit {
+  string audit_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  string target_id = 3;
+  float score = 4;
+  repeated string violations = 5;
+  AuditStatus status = 6;
+}
+
+enum AuditStatus {
+  AUDIT_STATUS_ALIGNED = 0;
+  AUDIT_STATUS_FLAGGED = 1;
+  AUDIT_STATUS_BLOCKED = 2;
+  AUDIT_STATUS_OVERRIDDEN = 3;
+}
+
+message ValueCommitment {
+  string commitment_id = 1;
+  string task_id = 2;
+  string issuer_id = 3;
+  google.protobuf.Timestamp created_at = 4;
+  CommitmentStatus status = 5;
+  CommitmentModality modality = 6;
+  EconomicImpact impact = 7;
+  optional string anchor_hash = 8;
+}
+
+enum CommitmentStatus {
+  COMMITMENT_STATUS_PROPOSED = 0;
+  COMMITMENT_STATUS_ACTIVE = 1;
+  COMMITMENT_STATUS_FULFILLED = 2;
+  COMMITMENT_STATUS_BREACHED = 3;
+}
+
+enum CommitmentModality {
+  COMMITMENT_MODALITY_ASPIRATIONAL = 0;
+  COMMITMENT_MODALITY_IMPERATIVE = 1;
+  COMMITMENT_MODALITY_CONDITIONAL = 2;
+}
+
+message EconomicImpact {
+  float labor_decoupling_score = 1;
+  float capital_generation_score = 2;
+  float utility_value = 3;
+  map<string, string> dsgm_metrics = 4;
 }
 
 enum TaskStatus {
@@ -77,6 +134,18 @@ message Artifact {
 message CreateTaskRequest {
   string input = 1;
   optional google.protobuf.Struct additional_input = 2;
+  // L4 Extension: Bind a pre-negotiated commitment
+  optional ValueCommitment commitment = 3;
+}
+
+message ProposeCommitmentRequest {
+  string input = 1;
+}
+
+message AuditAlignmentRequest {
+  string input = 1;
+  // L5: The Sovereign Lever
+  bool override_lever = 2;
 }
 
 message ExecuteStepRequest {

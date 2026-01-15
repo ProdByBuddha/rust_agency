@@ -26,6 +26,9 @@ use rust_agency::tools::{
 };
 use rust_agency::server::{run_server, AppState};
 
+use rust_agency::orchestrator::uap_grpc::{UapGrpcWrapper, AgentServiceServer};
+use tonic::transport::Server;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CONFIGURATION
 // ──────────────────────────────────────────────────────────────────────────────
@@ -138,6 +141,32 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // UAP: Sovereign gRPC Grid
+    // ──────────────────────────────────────────────────────────────────────────
+    if std::env::var("AGENCY_ENABLE_UAP").unwrap_or_default() == "1" {
+        // We'll use the dynamically configured provider for the UAP gRPC server
+        let uap_provider = rust_agency::agent::dynamic_provider();
+        let uap_tools = Arc::new(ToolRegistry::default());
+        // For the UAP exposure, we create a default ReActAgent as the performer
+        let uap_config = rust_agency::agent::AgentConfig::new(rust_agency::AgentType::GeneralChat, &rust_agency::orchestrator::profile::AgencyProfile::default());
+        let uap_agent = Arc::new(rust_agency::agent::ReActAgent::new_with_provider(uap_provider, uap_config, uap_tools));
+        
+        let uap_service = UapGrpcWrapper::new(uap_agent);
+        let uap_addr = std::env::var("AGENCY_UAP_ADDR").unwrap_or_else(|_| "0.0.0.0:50051".to_string()).parse()?;
+
+        println!("🌐 Spawning UAP gRPC Server (Sovereign Grid) at {}...", uap_addr);
+        tokio::spawn(async move {
+            if let Err(e) = Server::builder()
+                .add_service(AgentServiceServer::new(uap_service))
+                .serve(uap_addr)
+                .await 
+            {
+                eprintln!("❌ UAP gRPC Server crashed: {}", e);
+            }
+        });
+    }
+
     // Check for CLI arguments
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && (args[1] == "--visualize" || args[1] == "-v") {
@@ -178,9 +207,8 @@ async fn main() -> Result<()> {
     // Initialize Episodic Memory for Chat History
     let episodic_memory = Arc::new(Mutex::new(EpisodicMemory::default()));
 
-    // Primary LLM Provider: Use Remote Nexus (Llama 3.2 3B) to avoid reload lag
-    println!("🌐 Connecting to Remote Nexus Model Server (Llama 3.2 3B)...");
-    let provider: Arc<dyn rust_agency::agent::LLMProvider> = Arc::new(rust_agency::agent::RemoteNexusProvider::new());
+    // LLM Provider: Dynamic selection based on AGENCY_PROVIDER env var
+    let provider = rust_agency::agent::dynamic_provider();
 
     // Initialize session persistence
     let session_manager = SessionManager::new(&config.session_file);
@@ -319,11 +347,16 @@ async fn main() -> Result<()> {
     });
 
     // ──────────────────────────────────────────────────────────────────────────
-    // LAUNCH CLI (Foreground)
+    // LAUNCH INTERFACE
     // ──────────────────────────────────────────────────────────────────────────
-    // Launch the professional FPF-aligned CLI with SHARED speaker and supervisor
-    let cli = rust_agency::orchestrator::cli::AgencyCLI::new(shared_supervisor, shared_speaker);
-    cli.run().await?;
+    if std::env::var("AGENCY_DESKTOP").unwrap_or_default() == "1" {
+        println!("🎨 Launching Desktop Interface (Tauri)...");
+        rust_agency::desktop::run_desktop();
+    } else {
+        // Launch the professional FPF-aligned CLI with SHARED speaker and supervisor
+        let cli = rust_agency::orchestrator::cli::AgencyCLI::new(shared_supervisor, shared_speaker);
+        cli.run().await?;
+    }
 
     Ok(())
 }

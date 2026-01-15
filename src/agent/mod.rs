@@ -25,6 +25,8 @@ pub use ctm::ContinuousThoughtMachine;
 pub use provider::{LLMProvider, OllamaProvider, OpenAICompatibleProvider, CandleProvider, RemoteNexusProvider, PublishingProvider};
 pub use cache::{LLMCache, CachedProvider};
 pub use nqd::NQDPortfolio;
+pub use provider::dynamic_provider;
+pub use pai_core::uap::{SovereignAgent, UapTask, UapStep, UapTaskStatus, UapStepStatus, UapArtifact};
 
 use async_trait::async_trait;
 use thiserror::Error;
