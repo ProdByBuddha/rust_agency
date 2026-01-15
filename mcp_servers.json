@@ -1,3 +1,10 @@
 {
-  "servers": []
+  "servers": [
+    {
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/javoerokour/Desktop/BUDDHA/CODE/LAB/agency"],
+      "description": "Allows the PAI to read and write files within the project root for Rust development."
+    }
+  ]
 }

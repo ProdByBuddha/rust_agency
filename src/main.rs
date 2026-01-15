@@ -11,6 +11,7 @@
 use rust_agency::tools::McpServer;
 use anyhow::Result;
 use std::sync::Arc;
+use std::io::Write;
 use tracing::info;
 use tokio::sync::{Mutex, broadcast};
 
@@ -64,6 +65,67 @@ async fn main() -> Result<()> {
 
     // Load environment variables IMMEDIATELY
     dotenv::dotenv().ok();
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // ORCHESTRATION: Integrated Microservices
+    // ──────────────────────────────────────────────────────────────────────────
+    if std::env::var("AGENCY_USE_REMOTE_MEMORY").unwrap_or_default() == "1" {
+        tokio::spawn(async move {
+            if let Err(e) = rust_agency::services::memory::run_memory_server().await {
+                eprintln!("❌ Memory Server crashed: {}", e);
+            }
+        });
+        
+        // Wait for memory server to be ready
+        let client = reqwest::Client::new();
+        let port = std::env::var("AGENCY_MEMORY_PORT").unwrap_or_else(|_| "3001".to_string());
+        let url = format!("http://localhost:{}/health", port);
+        print!("⏳ Waiting for Memory Server...");
+        for _ in 0..30 {
+            if let Ok(res) = client.get(&url).send().await {
+                if res.status().is_success() {
+                    println!(" ✅ Ready!");
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            print!(".");
+            std::io::stdout().flush().ok();
+        }
+    }
+
+    if std::env::var("AGENCY_ENABLE_MOUTH").unwrap_or_default() == "1" {
+        tokio::spawn(async move {
+            if let Err(e) = rust_agency::services::speaker::run_speaker_server().await {
+                eprintln!("❌ Speaker Server crashed: {}", e);
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let port = std::env::var("AGENCY_SPEAKER_PORT").unwrap_or_else(|_| "3000".to_string());
+        let url = format!("http://localhost:{}/health", port);
+        print!("⏳ Waiting for Speaker Server...");
+        for _ in 0..30 {
+            if let Ok(res) = client.get(&url).send().await {
+                if res.status().is_success() {
+                    println!(" ✅ Ready!");
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            print!(".");
+            std::io::stdout().flush().ok();
+        }
+    }
+
+    if std::env::var("AGENCY_ENABLE_EARS").unwrap_or_default() == "1" {
+        tokio::spawn(async move {
+            if let Err(e) = rust_agency::services::listener::run_listener_server().await {
+                eprintln!("❌ Listener Server crashed: {}", e);
+            }
+        });
+        // Listener doesn't have a health endpoint yet, but it's okay to spawn it and move on
+    }
 
     // Check for CLI arguments
     let args: Vec<String> = std::env::args().collect();
