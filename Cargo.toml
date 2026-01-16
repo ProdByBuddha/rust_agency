@@ -113,6 +113,8 @@ prost-types = "0.13"
 # Persistent Task Queue
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 tokio-cron-scheduler = "0.9"
+rss = "2.0"
+notify = "6.1"
 
 # Tor/Arti for Anonymous A2A
 arti-client = { path = "arti/crates/arti-client", features = ["full", "tokio", "native-tls"] }

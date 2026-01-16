@@ -37,6 +37,7 @@ pub mod arti_a2a;
 pub mod uap_grpc;
 pub mod queue;
 pub mod scheduler;
+pub mod sensory;
 
 pub use crate::agent::speaker_rs::Speaker;
 pub use supervisor::{Supervisor, SupervisorResult};

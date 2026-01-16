@@ -66,6 +66,8 @@ pub struct Supervisor {
     pub recovery: Arc<pai_core::recovery::RecoveryJournal>,
     /// Persistent Task Queue
     pub task_queue: Arc<dyn TaskQueue>,
+    /// Sensory Cortex (Watchdog)
+    pub sensory: Arc<crate::orchestrator::sensory::SensoryCortex>,
 }
 
 impl Supervisor {
@@ -76,10 +78,16 @@ impl Supervisor {
 
     pub async fn new_with_provider(provider: Arc<dyn LLMProvider>, tools: Arc<crate::tools::ToolRegistry>) -> Self {
         let queue_path = std::env::var("AGENCY_TASK_DB").unwrap_or_else(|_| "agency_tasks.db".to_string());
-        let task_queue = Arc::new(SqliteTaskQueue::new(queue_path).await.expect("Failed to initialize task queue"));
+        let task_queue: Arc<dyn TaskQueue> = Arc::new(SqliteTaskQueue::new(queue_path).await.expect("Failed to initialize task queue"));
+        let sensory = Arc::new(crate::orchestrator::sensory::SensoryCortex::new(task_queue.clone()));
 
         // Register the TaskSpawnerTool to enable Cellular Division
         tools.register_instance(crate::tools::TaskSpawnerTool::new(task_queue.clone())).await;
+        // Register the WatchdogTool to enable Sensory Expansion
+        tools.register_instance(crate::tools::WatchdogTool::new(sensory.clone())).await;
+
+        // Start default project file sensor (FPF Grounding)
+        let _ = sensory.watch_file(".").await;
 
         Self {
             hw_lock: provider.get_lock(),
@@ -120,6 +128,7 @@ impl Supervisor {
                 Arc::new(pai_core::recovery::RecoveryJournal::new(std::path::PathBuf::from(pai_dir)))
             },
             task_queue,
+            sensory,
         }
     }
 
