@@ -92,6 +92,8 @@ impl Supervisor {
         tools.register_instance(crate::tools::NotifyTool::new(vocal_cords.clone())).await;
         // Register the SwarmBountyTool to enable Hive Intelligence
         tools.register_instance(crate::tools::SwarmBountyTool::new(task_queue.clone())).await;
+        // Register the MutationTool to enable Self-Evolution
+        tools.register_instance(crate::tools::MutationTool::default()).await;
 
         // Start default project file sensor (FPF Grounding)
         let _ = sensory.watch_file(".").await;

@@ -25,6 +25,7 @@ mod task_spawner;
 mod watchdog;
 mod notify;
 mod swarm_bounty;
+mod mutation;
 
 pub use web_search::WebSearchTool;
 pub use speaker_rs::SpeakerRsTool;
@@ -48,6 +49,7 @@ pub use task_spawner::TaskSpawnerTool;
 pub use watchdog::WatchdogTool;
 pub use notify::NotifyTool;
 pub use swarm_bounty::SwarmBountyTool;
+pub use mutation::MutationTool;
 
 use crate::agent::{AgentResult, LadeQuadrant};
 use crate::orchestrator::AgencyEvent;

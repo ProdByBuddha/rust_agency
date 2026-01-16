@@ -41,6 +41,12 @@ pub trait Memory: Send + Sync {
     /// Consolidate cold memories (dreaming)
     async fn consolidate(&self) -> Result<usize>;
 
+    /// Retrieve "Cold" memories for LLM summarization
+    async fn get_cold_memories(&self, limit: usize) -> Result<Vec<MemoryEntry>>;
+
+    /// Remove specific memories by ID
+    async fn prune(&self, ids: Vec<String>) -> Result<()>;
+
     /// Clear transient caches to free up RAM
     #[allow(dead_code)]
     async fn clear_cache(&self) -> Result<()>;
