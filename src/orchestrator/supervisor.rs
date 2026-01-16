@@ -24,7 +24,7 @@ use crate::orchestrator::{
     Objective, profile::AgencyProfile,
     aggregation::{Candidate, Gamma, RewardModel},
     ResultPortfolio, ScaleProfile, AgencyEvent,
-    queue::TaskQueue
+    queue::{TaskQueue, SqliteTaskQueue}
 };
 use pai_core::{HookManager, HookEvent, HookEventType};
 
@@ -65,7 +65,7 @@ pub struct Supervisor {
     /// PAI Recovery Journal
     pub recovery: Arc<pai_core::recovery::RecoveryJournal>,
     /// Persistent Task Queue
-    pub task_queue: Arc<TaskQueue>,
+    pub task_queue: Arc<dyn TaskQueue>,
 }
 
 impl Supervisor {
@@ -76,7 +76,7 @@ impl Supervisor {
 
     pub async fn new_with_provider(provider: Arc<dyn LLMProvider>, tools: Arc<crate::tools::ToolRegistry>) -> Self {
         let queue_path = std::env::var("AGENCY_TASK_DB").unwrap_or_else(|_| "agency_tasks.db".to_string());
-        let task_queue = Arc::new(TaskQueue::new(queue_path).await.expect("Failed to initialize task queue"));
+        let task_queue = Arc::new(SqliteTaskQueue::new(queue_path).await.expect("Failed to initialize task queue"));
 
         Self {
             hw_lock: provider.get_lock(),

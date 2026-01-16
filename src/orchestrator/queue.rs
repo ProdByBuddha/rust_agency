@@ -1,8 +1,6 @@
-//! Durable Task Queue backed by SQLite (rusqlite)
+//! Durable Task Queue Interface and Implementations
 //! 
-//! Provides a persistent queue for agent tasks, ensuring that
-//! intentions and planned actions survive process restarts.
-//! Uses rusqlite (synchronous) wrapped in spawn_blocking for async compatibility.
+//! "Skeletal System": Defines the structural interface for task persistence.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Deserialize};
@@ -12,6 +10,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task;
+use async_trait::async_trait;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -43,7 +42,7 @@ impl From<String> for TaskStatus {
             "completed" => TaskStatus::Completed,
             "failed" => TaskStatus::Failed,
             "retrying" => TaskStatus::Retrying,
-            _ => TaskStatus::Pending, // Default fallback
+            _ => TaskStatus::Pending,
         }
     }
 }
@@ -52,7 +51,7 @@ impl From<String> for TaskStatus {
 pub struct Task {
     pub id: String,
     pub kind: String,
-    pub payload: String, // JSON payload
+    pub payload: String,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -60,16 +59,24 @@ pub struct Task {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct TaskQueue {
-    db_path: PathBuf,
-    // We don't hold an open connection across await points because Connection is not Send/Sync.
-    // Instead, we open a new connection or pool in spawn_blocking.
-    // For sqlite, opening connection is fast.
+/// The Skeletal Interface for any Task Queue
+#[async_trait]
+pub trait TaskQueue: Send + Sync {
+    async fn enqueue(&self, kind: &str, payload: serde_json::Value) -> Result<String>;
+    async fn dequeue(&self) -> Result<Option<Task>>;
+    async fn complete(&self, task_id: &str) -> Result<()>;
+    async fn fail(&self, task_id: &str, error: &str, should_retry: bool) -> Result<()>;
+    async fn get_status(&self, task_id: &str) -> Result<Option<String>>;
+    async fn count(&self, status: &str) -> Result<i64>;
 }
 
-impl TaskQueue {
-    /// Initialize the task queue, creating the database file if needed
+/// Concrete Muscle: SQLite Implementation
+#[derive(Clone)]
+pub struct SqliteTaskQueue {
+    db_path: PathBuf,
+}
+
+impl SqliteTaskQueue {
     pub async fn new(db_path: impl AsRef<Path>) -> Result<Self> {
         let path = db_path.as_ref().to_path_buf();
         let path_clone = path.clone();
@@ -101,9 +108,11 @@ impl TaskQueue {
 
         Ok(Self { db_path: path })
     }
+}
 
-    /// Enqueue a new task
-    pub async fn enqueue(&self, kind: &str, payload: impl Serialize) -> Result<String> {
+#[async_trait]
+impl TaskQueue for SqliteTaskQueue {
+    async fn enqueue(&self, kind: &str, payload: serde_json::Value) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let payload_json = serde_json::to_string(&payload)?;
         let kind_str = kind.to_string();
@@ -121,15 +130,13 @@ impl TaskQueue {
         }).await?
     }
 
-    /// Dequeue the next pending task (FIFO) and mark it as running
-    pub async fn dequeue(&self) -> Result<Option<Task>> {
+    async fn dequeue(&self) -> Result<Option<Task>> {
         let path = self.db_path.clone();
 
         task::spawn_blocking(move || {
             let mut conn = Connection::open(&path)?;
             let tx = conn.transaction()?;
 
-            // Find next task
             let task_row: Option<(String, String, String, String, String, String, i32, Option<String>)> = tx.query_row(
                 "SELECT id, kind, payload, status, created_at, updated_at, attempts, last_error 
                  FROM tasks 
@@ -144,7 +151,6 @@ impl TaskQueue {
             ).optional()?;
 
             if let Some((id, kind, payload, status, created_at, updated_at, attempts, last_error)) = task_row {
-                // Update status
                 let now = Utc::now().to_rfc3339();
                 tx.execute(
                     "UPDATE tasks SET status = 'running', updated_at = ?1 WHERE id = ?2",
@@ -168,8 +174,7 @@ impl TaskQueue {
         }).await?
     }
 
-    /// Mark a task as completed
-    pub async fn complete(&self, task_id: &str) -> Result<()> {
+    async fn complete(&self, task_id: &str) -> Result<()> {
         let path = self.db_path.clone();
         let id = task_id.to_string();
 
@@ -184,8 +189,7 @@ impl TaskQueue {
         }).await?
     }
 
-    /// Mark a task as failed, optionally scheduling a retry
-    pub async fn fail(&self, task_id: &str, error: &str, should_retry: bool) -> Result<()> {
+    async fn fail(&self, task_id: &str, error: &str, should_retry: bool) -> Result<()> {
         let path = self.db_path.clone();
         let id = task_id.to_string();
         let err_msg = error.to_string();
@@ -203,8 +207,7 @@ impl TaskQueue {
         }).await?
     }
 
-    /// Get task status
-    pub async fn get_status(&self, task_id: &str) -> Result<Option<String>> {
+    async fn get_status(&self, task_id: &str) -> Result<Option<String>> {
         let path = self.db_path.clone();
         let id = task_id.to_string();
 
@@ -219,8 +222,7 @@ impl TaskQueue {
         }).await?
     }
 
-    /// Count tasks by status
-    pub async fn count(&self, status: &str) -> Result<i64> {
+    async fn count(&self, status: &str) -> Result<i64> {
         let path = self.db_path.clone();
         let status_str = status.to_string();
 
@@ -245,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn test_queue_workflow() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
-        let queue = TaskQueue::new(temp_file.path()).await?;
+        let queue = SqliteTaskQueue::new(temp_file.path()).await?;
 
         // Enqueue
         let task_id = queue.enqueue("test_job", json!({"foo": "bar"})).await?;
