@@ -116,6 +116,7 @@ tokio-cron-scheduler = "0.9"
 rss = "2.0"
 notify = "6.1"
 teloxide = { version = "0.13", features = ["macros"] }
+matrix-sdk = { version = "0.7", default-features = false, features = ["rustls-tls"] }
 
 # Tor/Arti for Anonymous A2A
 arti-client = { path = "arti/crates/arti-client", features = ["full", "tokio", "native-tls"] }
