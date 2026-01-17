@@ -1,6 +1,6 @@
 # Contributor License Agreement (CLA)
 
-Thank you for your interest in contributing to **rust_agency** ("We" or "Us"). This Contributor License Agreement ("Agreement") creates a clear record of the rights granted by you to Us in order to accept your Contributions.
+Thank you for your interest in contributing to **agency** ("We" or "Us"). This Contributor License Agreement ("Agreement") creates a clear record of the rights granted by you to Us in order to accept your Contributions.
 
 **1. Definitions**
 
