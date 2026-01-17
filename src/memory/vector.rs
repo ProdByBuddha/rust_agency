@@ -60,6 +60,13 @@ impl Memory for VectorMemory {
         }
     }
 
+    async fn get_recent(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
+        match self {
+            Self::Local(m) => m.get_recent(limit).await,
+            Self::Remote(m) => m.get_recent(limit).await,
+        }
+    }
+
     async fn count(&self) -> Result<usize> {
         match self {
             Self::Local(m) => m.count().await,
@@ -306,6 +313,15 @@ impl Memory for LocalVectorMemory {
         Ok(cold)
     }
 
+    async fn get_recent(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
+        let hot = self.hot_entries.read().await;
+        let mut recent: Vec<_> = hot.iter().cloned().collect();
+        // HOT entries are appended, so last is newest.
+        recent.reverse();
+        recent.truncate(limit);
+        Ok(recent)
+    }
+
     async fn prune(&self, ids: Vec<String>) -> Result<()> {
         let mut hot = self.hot_entries.write().await;
         hot.retain(|e| !ids.contains(&e.id));
@@ -429,6 +445,7 @@ impl Memory for RemoteVectorMemory {
 
     async fn consolidate(&self) -> Result<usize> { Ok(0) }
     async fn get_cold_memories(&self, _limit: usize) -> Result<Vec<MemoryEntry>> { Ok(Vec::new()) }
+    async fn get_recent(&self, _limit: usize) -> Result<Vec<MemoryEntry>> { Ok(Vec::new()) }
     async fn prune(&self, _ids: Vec<String>) -> Result<()> { Ok(()) }
     async fn clear_cache(&self) -> Result<()> { Ok(()) }
     async fn hibernate(&self) -> Result<()> { Ok(()) }

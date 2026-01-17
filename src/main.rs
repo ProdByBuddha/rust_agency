@@ -325,18 +325,48 @@ async fn main() -> Result<()> {
     // AUTONOMY: Durable Task Processing
     // ──────────────────────────────────────────────────────────────────────────
     {
-        let supervisor = shared_supervisor.clone();
+        let supervisor_ref = shared_supervisor.clone();
+        let provider_ref = provider.clone();
+        let memory_ref = memory.clone();
+        
         tokio::spawn(async move {
             info!("⚙️  Autonomy Engine Online (Background)");
+            let mut idle_counter = 0;
+            
             loop {
                 // We lock briefly to check/process one task
                 let processed = {
-                    let mut guard = supervisor.lock().await;
+                    let mut guard = supervisor_ref.lock().await;
                     guard.process_next_task().await.unwrap_or(false)
                 };
                 
                 if !processed {
+                    idle_counter += 1;
+                    
+                    // SOTA: Curiosity Drive (Gap #3)
+                    // If idle for 3 consecutive cycles (~15s), spark curiosity.
+                    if idle_counter >= 3 {
+                        let queue = {
+                            let guard = supervisor_ref.lock().await;
+                            guard.task_queue.clone()
+                        };
+                        
+                        let curiosity = rust_agency::orchestrator::curiosity::CuriosityEngine::new(
+                            provider_ref.clone(),
+                            memory_ref.clone(),
+                            queue
+                        );
+                        
+                        if let Ok(triggered) = curiosity.spark_curiosity().await {
+                            if triggered {
+                                idle_counter = 0; // Reset after sparking
+                            }
+                        }
+                    }
+                    
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                } else {
+                    idle_counter = 0;
                 }
             }
         });

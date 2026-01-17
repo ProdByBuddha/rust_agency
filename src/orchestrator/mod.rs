@@ -31,9 +31,10 @@ pub mod cli;
 pub mod context;
 pub mod optimal_info;
 pub mod crystallizer;
-
-#[macro_use]
+pub mod curiosity;
 pub mod event_bus;
+
+pub use scheduler::AgencyScheduler;
 pub mod a2a;
 pub mod arti_a2a;
 pub mod uap_grpc;

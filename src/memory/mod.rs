@@ -31,6 +31,9 @@ pub trait Memory: Send + Sync {
     /// Search for relevant memories based on a query
     async fn search(&self, query: &str, top_k: usize, context: Option<&str>, kind: Option<crate::orchestrator::Kind>) -> Result<Vec<MemoryEntry>>;
     
+    /// Get the N most recent memories
+    async fn get_recent(&self, limit: usize) -> Result<Vec<MemoryEntry>>;
+
     /// Get total number of entries
     #[allow(dead_code)]
     async fn count(&self) -> Result<usize>;
