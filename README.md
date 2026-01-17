@@ -138,3 +138,13 @@ Licensed under the **Functional Source License (FSL) 1.1**.
 - **Restriction**: You may **not** use this software to build a competing product or service.
 - **Conversion**: On **2028-01-16**, this version automatically converts to **Apache 2.0**.
 - **Contribution**: Contributors are required to agree to the [Contributor License Agreement (CLA)](CLA.md).
+
+## Star History
+
+<a href="https://www.star-history.com/#prodbybuddha/agency&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=prodbybuddha/agency&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=prodbybuddha/agency&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=prodbybuddha/agency&type=date&legend=top-left" />
+ </picture>
+</a>
