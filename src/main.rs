@@ -62,9 +62,18 @@ async fn main() -> Result<()> {
     // SOTA: Apply Process Hardening (codex-inspired)
     rust_agency::safety::hardening::apply_hardening();
 
-    // SOTA: Professional Observability (OpenTelemetry)
-    let _otel_guard = rust_agency::utils::otel::init_telemetry("rust_agency")
+    // Initialize tracing (logs)
+    let _guard = rust_agency::utils::otel::init_telemetry("rust_agency")
         .expect("Failed to initialize OpenTelemetry");
+    info!("🚀 Rust Agency Starting...");
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // HARDENING: System Diagnostic Check
+    // ──────────────────────────────────────────────────────────────────────────
+    if let Err(e) = rust_agency::utils::hardening::SystemHardening::verify_environment().await {
+        tracing::error!("🛑 Startup Failed: {}", e);
+        std::process::exit(1);
+    }
 
     // Load environment variables IMMEDIATELY
     dotenv::dotenv().ok();

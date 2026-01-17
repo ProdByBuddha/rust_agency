@@ -71,8 +71,16 @@ Cargo.lock
 *.onnx
 *.safetensors
 *.wav
+*.dylib
+*.so
+*.dll
 
 # Large Data Files
 data/*.pdf
 
 *.pem
+*.enc
+agency_history.jsonl
+agency_profile.json
+/artifacts/bin/
+agency.log*

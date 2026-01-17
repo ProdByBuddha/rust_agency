@@ -132,4 +132,9 @@ Contributions are welcome! Please follow the **FPF** guidelines when adding new 
 
 ## 📄 License
 
-Open-source.
+Licensed under the **Functional Source License (FSL) 1.1**. 
+
+- **Permissions**: You can view, modify, and run this software for any purpose.
+- **Restriction**: You may **not** use this software to build a competing product or service.
+- **Conversion**: On **2028-01-16**, this version automatically converts to **Apache 2.0**.
+- **Contribution**: Contributors are required to agree to the [Contributor License Agreement (CLA)](CLA.md).

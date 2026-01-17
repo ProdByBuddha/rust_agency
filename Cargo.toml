@@ -83,6 +83,7 @@ opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.26"
 konst = "0.3"
 memmap2 = "0.9"
+aes-gcm = "0.10"
 hex = "0.4"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 urlencoding = "2.1"
