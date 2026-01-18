@@ -89,12 +89,40 @@
       "is_quantized": true,
       "quant_file": "model-q4_0.gguf",
       "description": "Moondream2 (Quantized) - Lightweight vision-language model for image understanding."
+    },
+    {
+      "name": "glm-4.7",
+      "repo": "z-ai/glm-4.7",
+      "revision": "main",
+      "tokenizer_repo": "z-ai/glm-4.7",
+      "is_quantized": false,
+      "quant_file": null,
+      "description": "Z.ai GLM-4.7 - Latest flagship flagship model with advanced reasoning and multi-lingual capabilities."
+    },
+    {
+      "name": "glm-4-plus",
+      "repo": "z-ai/glm-4-plus",
+      "revision": "main",
+      "tokenizer_repo": "z-ai/glm-4-plus",
+      "is_quantized": false,
+      "quant_file": null,
+      "description": "Z.ai GLM-4 Plus - Optimized for high-throughput agentic tasks."
+    },
+    {
+      "name": "glm-4-flash",
+      "repo": "z-ai/glm-4-flash",
+      "revision": "main",
+      "tokenizer_repo": "z-ai/glm-4-flash",
+      "is_quantized": false,
+      "quant_file": null,
+      "description": "Z.ai GLM-4 Flash - Ultra-fast, low-latency model for real-time interaction."
     }
   ],
   "defaults": {
     "tiny": "qwen2.5-coder:0.5b",
     "standard": "qwen2.5:3b-q4",
-    "heavy": "qwen2.5:7b-q4",
-    "coder": "qwen2.5-coder:7b-q4"
+    "heavy": "glm-4.7",
+    "coder": "qwen2.5-coder:7b-q4",
+    "fast": "glm-4-flash"
   }
 }

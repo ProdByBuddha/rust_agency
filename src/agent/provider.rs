@@ -843,6 +843,13 @@ pub fn dynamic_provider() -> Arc<dyn LLMProvider> {
             println!("☁️  Initializing OpenAI-Compatible Cloud Provider at {}...", base_url);
             Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
         }
+        "zai" | "glm" => {
+            let base_url = "https://open.bigmodel.cn/api/paas/v4".to_string();
+            let api_key = std::env::var("ZAI_API_KEY").ok();
+            
+            println!("🇨🇳 Initializing Z.ai (Zhipu AI) Provider at {}...", base_url);
+            Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
+        }
         "candle" | "native" => {
             println!("🦀 Initializing Native Candle (Rust) Provider...");
             Arc::new(CandleProvider::new().expect("Failed to initialize Candle provider"))
