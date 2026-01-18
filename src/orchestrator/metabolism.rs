@@ -11,8 +11,6 @@ use anyhow::{Result, anyhow};
 use tracing::{info, warn};
 use std::collections::HashMap;
 use async_trait::async_trait;
-use alloy_rlp::{RlpEncodable, Encodable};
-use alloy_primitives::{Address, U256, Bytes};
 use crate::orchestrator::vault::AgencyVault;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -116,8 +114,6 @@ impl ChainWallet for RpcWallet {
 
         // 2. Check Vault (Do we have the key?)
         let vault = self.vault.lock().await;
-        // In simulation, we check if keys exist in the struct logic, ensuring the "Apprentice" is initialized.
-        // For Bitcoin, we skip check as our vault is EVM/SOL focused currently.
         let key_available = match self.network {
             Network::Bitcoin => true, // Skipping BTC key check for prototype
             Network::Solana => vault.get_sol_key().is_some(),
@@ -137,12 +133,11 @@ impl ChainWallet for RpcWallet {
         } else {
             // Master Authority Required: Escalate
             info!("🛡️ Economy: ESCALATED {} on {:?} to Master. (Over limit {})", amount, self.network, self.limit);
-            // We do NOT deduct balance yet, as it's just a request
             TransactionStatus::EscalatedToMaster
         };
 
         let tx = Transaction {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: format!("0x{:x}", uuid::Uuid::new_v4().as_u128()),
             network: self.network.clone(),
             amount: amount.to_string(),
             description: description.to_string(),
@@ -170,11 +165,6 @@ impl EconomicMetabolism {
         }
 
         let mut wallets: HashMap<Network, Box<dyn ChainWallet>> = HashMap::new();
-        
-        // Limits: 
-        // BTC: 0.001 (~$50)
-        // ETH: 0.01 (~$30)
-        // SOL: 0.5 (~$75)
         
         wallets.insert(Network::Bitcoin, Box::new(RpcWallet::new(
             Network::Bitcoin, "https://blockstream.info/api", "bc1q...", 10000.0, vault.clone(), 0.001

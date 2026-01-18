@@ -65,14 +65,14 @@ async fn main() -> Result<()> {
     let eth_bal = metabolism.get_balance(Network::Ethereum).await?;
     println!("   Current ETH: {}", eth_bal);
     
-    let tx_id = metabolism.spend(
+    let tx_msg = metabolism.spend(
         Network::Ethereum, 
         "0.05", 
         "Hiring a researcher", 
         TransactionCategory::SwarmLabor
     ).await?;
     
-    assert!(tx_id.starts_with("0x"));
+    assert!(tx_msg.contains("0x"));
     println!("✅ Economy: Multi-chain virtual ledger verified.");
 
     // 4. TEST: VOCAL CORDS (Communication)
