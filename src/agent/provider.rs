@@ -5,6 +5,7 @@ use serde_json::json;
 use reqwest::Client;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{info, debug, error};
 use lazy_static::lazy_static;
 use std::fs::File;
 use std::collections::HashMap;
@@ -776,13 +777,21 @@ impl LLMProvider for OpenAICompatibleProvider {
         });
 
         let mut request = self.client.post(format!("{}/chat/completions", self.base_url.trim_end_matches('/')))
+            .header("Accept-Language", "en-US,en")
             .json(&body);
 
         if let Some(ref key) = self.api_key {
             request = request.bearer_auth(key);
         }
 
-        let res = request.send().await?.error_for_status()?;
+        let res = request.send().await?;
+        
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
+            println!("❌ Z.ai/OpenAI API Error ({}): {}", status, text);
+            return Err(anyhow::anyhow!("HTTP status client error ({}) for url ({}): {}", status, self.base_url, text));
+        }
         
         let stream = res.bytes_stream();
         let mapped_stream = stream.map(|res| {
@@ -815,6 +824,115 @@ impl LLMProvider for OpenAICompatibleProvider {
     }
 }
 
+pub struct OllamaCloudProvider {
+    client: Client,
+    url: String,
+    api_key: Option<String>,
+    lock: Arc<Mutex<()>>,
+}
+
+impl OllamaCloudProvider {
+    pub fn new(api_key: Option<String>) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120)) // High-parameter models are slow
+            .user_agent("rust_agency/0.2.0")
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self {
+            client,
+            url: "https://ollama.com/api/chat".to_string(),
+            api_key,
+            lock: GLOBAL_HW_LOCK.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMProvider for OllamaCloudProvider {
+    async fn generate(&self, model: &str, prompt: String, system: Option<String>) -> Result<String> {
+        let mut stream = self.generate_stream(model, prompt, system).await?;
+        let mut full_text = String::new();
+        while let Some(chunk) = stream.next().await {
+            full_text.push_str(&chunk?);
+        }
+        Ok(full_text)
+    }
+
+    async fn generate_stream(&self, model: &str, prompt: String, system: Option<String>) -> Result<BoxStream<'static, Result<String>>> {
+        let mut messages = Vec::new();
+        if let Some(sys) = system {
+            messages.push(json!({ "role": "system", "content": sys }));
+        }
+        messages.push(json!({ "role": "user", "content": prompt }));
+
+        let body = json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        });
+
+        let mut request = self.client.post(&self.url)
+            .json(&body);
+
+        if let Some(ref key) = self.api_key {
+            request = request.bearer_auth(key);
+        }
+
+        let res = request.send().await?;
+        
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_else(|_| "Could not read error body".to_string());
+            error!("❌ Ollama Cloud Error ({}): {}", status, text);
+            return Err(anyhow::anyhow!("Ollama Cloud Error ({}): {}", status, text));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::task::spawn(async move {
+            let mut stream = res.bytes_stream();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        for line in text.lines() {
+                            if line.trim().is_empty() { continue; }
+                            match serde_json::from_str::<serde_json::Value>(line) {
+                                Ok(json) => {
+                                    if let Some(content) = json["message"]["content"].as_str() {
+                                        let _ = tx.send(Ok(content.to_string()));
+                                    }
+                                    if json["done"].as_bool().unwrap_or(false) {
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("❌ Ollama Cloud Parse Error: {} (Content: {})", e, line);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ Ollama Cloud stream network error: {}", e);
+                        let _ = tx.send(Err(anyhow::anyhow!("Ollama Cloud stream error: {}", e)));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|val| (val, rx))
+        });
+        Ok(Box::pin(stream))
+    }
+
+    fn get_lock(&self) -> Arc<Mutex<()>> {
+        self.lock.clone()
+    }
+}
+
 pub fn dynamic_provider() -> Arc<dyn LLMProvider> {
     let provider_type = std::env::var("AGENCY_PROVIDER").unwrap_or_else(|_| "nexus".to_string());
     
@@ -828,12 +946,10 @@ pub fn dynamic_provider() -> Arc<dyn LLMProvider> {
             let client = ollama_rs::Ollama::new(host, port);
             Arc::new(OllamaProvider::new(client))
         }
-        "turbo" | "ollama-cloud" => {
-            let base_url = "https://api.ollama.com/v1".to_string();
+        "turbo" | "ollama-cloud" | "ollama-hosted" => {
             let api_key = std::env::var("OLLAMA_API_KEY").ok();
-            
-            println!("🚀 Initializing Ollama Turbo Cloud (SOTA) at {}...", base_url);
-            Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
+            println!("☁️  Initializing Ollama Cloud Hosted Inference at https://ollama.com/api...");
+            Arc::new(OllamaCloudProvider::new(api_key))
         }
         "openai" | "cloud" => {
             let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
@@ -843,10 +959,10 @@ pub fn dynamic_provider() -> Arc<dyn LLMProvider> {
             Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
         }
         "zai" | "glm" => {
-            let base_url = "https://open.bigmodel.cn/api/paas/v4".to_string();
+            let base_url = "https://api.z.ai/api/paas/v4".to_string();
             let api_key = std::env::var("ZAI_API_KEY").ok();
             
-            println!("🇨🇳 Initializing Z.ai (Zhipu AI) Provider at {}...", base_url);
+            println!("🚀 Initializing Z.ai (Zhipu AI) Provider at {}...", base_url);
             Arc::new(OpenAICompatibleProvider::new(base_url, api_key))
         }
         "candle" | "native" => {

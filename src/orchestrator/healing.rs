@@ -87,10 +87,21 @@ impl HealingEngine {
         // 3. Analyze for symptoms
         let mut current_errors = Vec::new();
         for line in lines {
+            // SOTA: Ignore self-generated logs to prevent Infinite Feedback Loops
+            if line.contains("Healing Engine") || line.contains("Doctor:") || line.contains("MISSION:") || line.contains("ESCALATION") {
+                continue;
+            }
+
             if line.contains("ERROR") || line.contains("panic") || line.contains("failed") {
-                // Generate a simplified signature (e.g., remove timestamps/dynamic data if possible)
-                // For this prototype, we'll use the raw line content as signature, strictly simplified
-                let signature = line.split_whitespace().skip(2).collect::<Vec<&str>>().join(" ");
+                // Generate a simplified signature (strip timestamp and log level)
+                // Format: 2026-01-18T... LEVEL Message
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let signature = if parts.len() > 3 {
+                    parts[3..].join(" ") // Start after timestamp and level
+                } else {
+                    line.to_string()
+                };
+                
                 current_errors.push((line.to_string(), signature));
             }
         }
