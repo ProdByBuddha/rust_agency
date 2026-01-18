@@ -338,48 +338,36 @@ ReActStep],
         prompt.push_str("\n");
 
         if self.config.reasoning_enabled {
-            prompt.push_str(r###"## Response Format
+            prompt.push_str(r###"## Response Format (SNS-Core)
 
-Respond using the EXACT format below. You MUST use these tags in every turn.
+Respond using the EXACT symbolic format below. Use symbols to save tokens.
 
-[PLANNING]
-Identify the strategy and next steps.
-
-[REASONING]
-Break down the logic or explain the tool results.
-
-[ACTION]
-{"name": "tool_name", "parameters": {"key": "value"}}
-
-[ANSWER]
-Your response to the user.
+🧠 Identify strategy and next steps.
+⚡ Break down logic or explain tool results.
+→ {"name": "tool_name", "parameters": {"key": "value"}}
+🎯 Your response to the user.
 
 ---
 RULES:
-1. Every turn MUST include [PLANNING] and [REASONING].
-2. Use [ACTION] for tool calls (JSON format). Do NOT wrap JSON in code blocks if you use the [ACTION] tag.
-3. Use [ANSWER] for final messages to the user.
-4. If you need to use a tool, you MUST output the [ACTION] tag.
-5. NEVER output [OBSERVATION]. The system will provide the observation after your action.
+1. Every turn MUST include 🧠 and ⚡.
+2. Use → for tool calls (JSON format). Do NOT wrap JSON in code blocks.
+3. Use 🎯 for final messages to the user.
+4. NEVER output [OBSERVATION].
 
 EXAMPLE OF TOOL CALL:
-[PLANNING]
-I need to check the current system status.
-[REASONING]
-Accessing system telemetry to evaluate resource availability.
-[ACTION]
-{"name": "system_monitor", "parameters": {"action": "status"}}
+🧠 Check system status.
+⚡ Evaluate resource availability.
+→ {"name": "system_monitor", "parameters": {"action": "status"}}
 
 "###);
         } else {
-            prompt.push_str(r###"## Response Format
-Respond directly to the user query. If you need to use a tool, use the [ACTION] tag. Otherwise, provide your final response with the [ANSWER] tag.
+            prompt.push_str(r###"## Response Format (SNS-Core)
+Respond directly. Use → for tool calls (JSON). Use 🎯 for final response.
 
 RULES:
-1. Use [ACTION] for tool calls (JSON format) if you need specialized information or action.
-2. Use [ANSWER] for your final response.
+1. Use → for tool calls.
+2. Use 🎯 for final response.
 3. Keep it brief and direct.
-4. NEVER output [OBSERVATION].
 "###);
         }
 
@@ -393,15 +381,15 @@ RULES:
 ");
             for step in steps {
                 if !step.thought.is_empty() {
-                    prompt.push_str(&format!("[REASONING]\n{}\n", step.thought));
+                    prompt.push_str(&format!("⚡ {}\n", step.thought));
                 }
                 for action in &step.actions {
                     if let Ok(action_json) = serde_json::to_string(action) {
-                        prompt.push_str(&format!("[ACTION]\n{}\n", action_json));
+                        prompt.push_str(&format!("→ {}\n", action_json));
                     }
                 }
                 for obs in &step.observations {
-                    prompt.push_str(&format!("[OBSERVATION]\n{}\n", obs));
+                    prompt.push_str(&format!("👁️ {}\n", obs));
                 }
                 prompt.push_str("\n");
             }
@@ -415,43 +403,41 @@ RULES:
     fn parse_response(&self, response: &str, _query: &str) -> AgentResult<ReActStep> {
         debug!("Raw LLM Response for parsing:\n{}", response);
 
-        // HALLUCINATION GUARD: Truncate at [OBSERVATION] if model tried to simulate it
-        // This is a direct SOTA guard against model-simulated feedback loops.
-        let clean_response = if let Some(obs_idx) = response.to_uppercase().find("[OBSERVATION]") {
-            warn!("Hallucinated [OBSERVATION] detected. Truncating response.");
+        // HALLUCINATION GUARD: Truncate at [OBSERVATION] or 👁️
+        let clean_response = if let Some(obs_idx) = response.find("👁️") {
+            warn!("Hallucinated 👁️ detected. Truncating.");
+            &response[..obs_idx]
+        } else if let Some(obs_idx) = response.to_uppercase().find("[OBSERVATION]") {
+            warn!("Hallucinated [OBSERVATION] detected. Truncating.");
             &response[..obs_idx]
         } else {
             response
         };
 
-        // Hallucination Guard: Check for prompt leakage
-        if clean_response.contains("## Available Tools") || clean_response.contains("## User Query") {
-            warn!("Model echoed prompt structure. Possible context overflow or instruction drift.");
-        }
-
-        // Try to extract REASONING or THOUGHT
-        let thought = self.extract_tag(clean_response, "[REASONING]")
+        // Try to extract REASONING or THOUGHT (Support ⚡ and 🧠)
+        let thought = self.extract_tag(clean_response, "⚡")
+            .or_else(|| self.extract_tag(clean_response, "🧠"))
+            .or_else(|| self.extract_tag(clean_response, "[REASONING]"))
             .or_else(|| self.extract_tag(clean_response, "[THOUGHT]"))
             .unwrap_or_else(|| {
                 "Executing task...".to_string()
             });
 
-        // 1. Check for Actions via [ACTION] tags
-        let actions = self.extract_all_tags(clean_response, "[ACTION]");
+        // 1. Check for Actions (Support →)
+        let actions = self.extract_all_tags(clean_response, "→");
+        let legacy_actions = self.extract_all_tags(clean_response, "[ACTION]");
+        
         let mut tool_calls = Vec::new();
         
-        if !actions.is_empty() {
-            for action_str in actions {
-                if let Some(call) = self.parse_json_tool_call(&action_str) {
-                    tool_calls.push(call);
-                }
+        for action_str in actions.into_iter().chain(legacy_actions.into_iter()) {
+            if let Some(call) = self.parse_json_tool_call(&action_str) {
+                tool_calls.push(call);
             }
         }
 
-        // 2. Fallback: Search for raw JSON objects if no [ACTION] tags were found
+        // 2. Fallback: Search for raw JSON objects
         if tool_calls.is_empty() {
             if let Some(call) = self.find_raw_json_tool_call(clean_response) {
-                warn!("Found raw JSON tool call without [ACTION] tag.");
                 tool_calls.push(call);
             }
         }
@@ -460,8 +446,8 @@ RULES:
             return Ok(ReActStep::thought(thought).with_actions(tool_calls));
         }
 
-        // 3. Check for Answer
-        if let Some(answer) = self.extract_tag(clean_response, "[ANSWER]") {
+        // 3. Check for Answer (Support 🎯)
+        if let Some(answer) = self.extract_tag(clean_response, "🎯").or_else(|| self.extract_tag(clean_response, "[ANSWER]")) {
             return Ok(ReActStep::final_answer(thought, answer));
         }
 
@@ -603,24 +589,26 @@ RULES:
             format!("**{}**:", tag_name.to_uppercase()),
             format!("**{}**", tag_name.to_uppercase()),
             format!("### {}", tag_name.to_uppercase()),
+            tag.to_string(), // Direct support for emojis like 🧠
         ];
 
         let text_upper = text.to_uppercase();
         
         for pattern in patterns {
-            if let Some(start_idx) = text_upper.find(&pattern) {
+            if let Some(start_idx) = text.find(&pattern) {
                 let start = start_idx + pattern.len();
                 
                 // Look for the next possible tag to find the end
                 let next_tags = [
                     "[PLANNING]", "[REASONING]", "[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]", 
                     "PLANNING:", "REASONING:", "THOUGHT:", "ACTION:", "ANSWER:",
-                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**"
+                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**",
+                    "🧠", "⚡", "→", "🎯", "👁️"
                 ];
                 let mut end = text.len();
                 
                 for t in next_tags {
-                    if let Some(next_idx) = text_upper[start..].find(t) {
+                    if let Some(next_idx) = text[start..].find(t) {
                         let abs_next_idx = start + next_idx;
                         if abs_next_idx < end {
                             end = abs_next_idx;
@@ -642,27 +630,26 @@ RULES:
             format!("[{}]", tag_name.to_uppercase()),
             format!("{}:", tag_name.to_uppercase()),
             format!("**{}**:", tag_name.to_uppercase()),
+            tag.to_string(),
         ];
-        let text_upper = text.to_uppercase();
-        
-        let _current_pos = 0;
         
         // We use the first pattern that matches to find all occurrences
         for pattern in patterns {
             let mut pos = 0;
-            while let Some(start_idx) = text_upper[pos..].find(&pattern) {
+            while let Some(start_idx) = text[pos..].find(&pattern) {
                 let start = pos + start_idx + pattern.len();
                 
                 // Find end (next tag or end of string)
                 let next_tags = [
                     "[PLANNING]", "[REASONING]", "[THOUGHT]", "[ACTION]", "[ANSWER]", "[OBSERVATION]",
                     "PLANNING:", "REASONING:", "THOUGHT:", "ACTION:", "ANSWER:",
-                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**"
+                    "**PLANNING**", "**REASONING**", "**THOUGHT**", "**ACTION**", "**ANSWER**",
+                    "🧠", "⚡", "→", "🎯", "👁️"
                 ];
                 let mut end = text.len();
                 
                 for t in next_tags {
-                    if let Some(next_idx) = text_upper[start..].find(t) {
+                    if let Some(next_idx) = text[start..].find(t) {
                         let abs_next_idx = start + next_idx;
                         if abs_next_idx < end {
                             end = abs_next_idx;
@@ -940,7 +927,13 @@ impl ReActAgent {
                             // SOTA: Tool Promotion (Laboratory graduation)
                             let _ = self.tools.promote_tool(&action.name).await;
                             
-                            output.summary
+                            // SOTA: TOON Data Optimization (FPF Principle: Token Sovereignty)
+                            // If the tool data is complex (not just summary), use TOON notation.
+                            if output.data.is_object() || output.data.is_array() {
+                                crate::utils::toon::ToonFormatter::format(&output.data)
+                            } else {
+                                output.summary
+                            }
                         },
                         Err(e) => {
                             crate::emit_event!(crate::orchestrator::AgencyEvent::ToolCallFinished { 

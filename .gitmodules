@@ -28,3 +28,6 @@
 [submodule "infra-as-an-organism"]
 	path = crates/infra-as-an-organism
 	url = https://github.com/prodbybuddha/infra-as-an-organism
+[submodule "crates/toon"]
+	path = crates/toon
+	url = https://github.com/toon-format/toon.git

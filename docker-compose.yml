@@ -9,20 +9,34 @@ services:
     environment:
       - HF_TOKEN=${HF_TOKEN}
     volumes:
-      # Mount the HF cache so we don't redownload models inside the container
       - ~/.cache/huggingface:/root/.cache/huggingface
-    deploy:
-      resources:
-        limits:
-          memory: 4G
     restart: unless-stopped
 
   jaeger:
     image: jaegertracing/all-in-one:latest
     container_name: agency-jaeger
     ports:
-      - "16686:16686" # Web UI
-      - "4317:4317"  # OTLP gRPC (used by collector)
+      - "16686:16686"
+      - "4317:4317"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+
+  # SOTA: Proton VPN + Proxy Stack
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: agency-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "8888:8888/tcp" # HTTP Proxy for LLM Traffic
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${PROTON_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${PROTON_ADDRESSES}
+      - SERVER_COUNTRIES=${PROTON_SERVER_COUNTRY} # e.g. "Netherlands"
+      - HTTPPROXY=on
     restart: unless-stopped

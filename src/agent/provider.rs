@@ -634,13 +634,6 @@ impl LLMProvider for OllamaProvider {
     }
 }
 
-pub struct OpenAICompatibleProvider {
-    client: Client,
-    base_url: String,
-    api_key: Option<String>,
-    lock: Arc<Mutex<()>>,
-}
-
 pub struct RemoteNexusProvider {
     client: Client,
     url: String,
@@ -740,10 +733,28 @@ impl LLMProvider for RemoteNexusProvider {
     }
 }
 
+pub struct OpenAICompatibleProvider {
+    client: Client,
+    base_url: String,
+    api_key: Option<String>,
+    lock: Arc<Mutex<()>>,
+}
+
 impl OpenAICompatibleProvider {
     pub fn new(base_url: String, api_key: Option<String>) -> Self {
+        let mut builder = Client::builder();
+        
+        // SOTA: WireGuard/Proxy Integration (FPF Principle: Regional Sovereignty)
+        // If a proxy is configured in environment, route all Z.ai traffic through it.
+        if let Ok(proxy_url) = std::env::var("AGENCY_LLM_PROXY") {
+            if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                println!("🌐 Routing LLM traffic through proxy: {}", proxy_url);
+                builder = builder.proxy(proxy);
+            }
+        }
+
         Self {
-            client: Client::new(),
+            client: builder.build().unwrap_or_else(|_| Client::new()),
             base_url,
             api_key,
             lock: GLOBAL_HW_LOCK.clone(),
