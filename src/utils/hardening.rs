@@ -24,13 +24,18 @@ impl SystemHardening {
 
     /// Critical: Ensure the Seatbelt profile exists
     async fn check_sandbox_profile() -> Result<()> {
-        let profile_path = Path::new("conduit.sb");
-        if !profile_path.exists() {
+        let profile_path = Path::new("config/conduit.sb");
+        let root_path = Path::new("conduit.sb");
+        
+        if profile_path.exists() {
+            info!("✅ Hardening: Sandbox profile verified at 'config/conduit.sb'.");
+        } else if root_path.exists() {
+            info!("✅ Hardening: Sandbox profile verified at 'conduit.sb'.");
+        } else {
             // In a real release, we might write a default one here.
             // For now, we fail because safety is mandatory.
-            return Err(anyhow::anyhow!("CRITICAL: Sandbox profile 'conduit.sb' not found. The Immune System cannot function."));
+            return Err(anyhow::anyhow!("CRITICAL: Sandbox profile 'conduit.sb' not found in root or config/. The Immune System cannot function."));
         }
-        info!("✅ Hardening: Sandbox profile verified.");
         Ok(())
     }
 
