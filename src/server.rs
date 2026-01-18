@@ -18,7 +18,7 @@ use crate::memory::EpisodicMemory;
 use crate::orchestrator::Supervisor;
 
 // --- SOTA: Robust Error Handling ---
-struct ServerError(anyhow::Error);
+pub struct ServerError(anyhow::Error);
 
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
@@ -156,6 +156,7 @@ pub async fn run_server(state: AppState) -> Result<()> {
         .route("/", get(dashboard))
         .route("/ws", get(ws_handler))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(crate::services::responses::responses_handler))
         .route("/v1/a2a/interact", post(a2a_interact_handler))
         .route("/v1/memory/clear", post(clear_memory))
         .layer(TraceLayer::new_for_http())
