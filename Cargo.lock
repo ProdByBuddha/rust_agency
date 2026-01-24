@@ -10141,7 +10141,7 @@ dependencies = [
  "rusqlite",
  "rustfft",
  "safetensors 0.4.5",
- "schemars 0.8.22",
+ "schemars 1.2.0",
  "screenshots",
  "serde",
  "serde_json",
